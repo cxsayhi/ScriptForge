@@ -11,8 +11,10 @@ spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: ${DB_URL:jdbc:mysql://localhost:3306/novel_script?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
-    username: ${DB_USERNAME:root}
-    password: ${DB_PASSWORD:}
+    # username: ${DB_USERNAME:root}
+    username: root
+    # password: ${DB_PASSWORD:}
+    password: 464831
   mvc:
     pathmatch:
       matching-strategy: ant_path_matcher
@@ -28,11 +30,33 @@ mybatis-plus:
 scriptforge:
   storage:
     root: ../storage
-  gemini:
+  ai:
     enabled: true
-    endpoint: https://generativelanguage.googleapis.com/v1beta/models
-    api-key: ${GEMINI_API_KEY}
-    model: "gemini-2.5-flash-lite"
-    thinking-budget: 0
-    max-tool-rounds: 3
-    max-conversation-messages: 12
+    provider: gemini
+    gemini:
+      endpoint: https://generativelanguage.googleapis.com/v1beta/models
+      api-key: ${GEMINI_API_KEY:}
+      model: gemini-2.5-flash-lite
+      thinking-budget: 0
+      max-tool-rounds: 3
+      max-conversation-messages: 12
+      temperature: 0.7
+      max-tokens: 4096
+    openai:
+      endpoint: ${OPENAI_ENDPOINT:https://api.openai.com/v1}
+      api-key: ${OPENAI_API_KEY:}
+      model: ${OPENAI_MODEL:gpt-4o-mini}
+      temperature: 0.7
+      max-tokens: 4096
+    deepseek:
+      endpoint: ${DEEPSEEK_ENDPOINT:https://api.deepseek.com/v1}
+      api-key: ${DEEPSEEK_API_KEY:}
+      model: ${DEEPSEEK_MODEL:deepseek-chat}
+      temperature: 0.7
+      max-tokens: 4096
+    qwen:
+      endpoint: ${QWEN_ENDPOINT:https://dashscope.aliyuncs.com/compatible-mode/v1}
+      api-key: ${QWEN_API_KEY:}
+      model: ${QWEN_MODEL:qwen-turbo}
+      temperature: 0.7
+      max-tokens: 4096
