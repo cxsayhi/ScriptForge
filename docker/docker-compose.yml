@@ -1,0 +1,16 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: scriptforge-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: scriptforge
+      MYSQL_DATABASE: scriptforge
+      MYSQL_USER: scriptforge
+      MYSQL_PASSWORD: scriptforge
+    ports:
+      - "3306:3306"
+    volumes:
+      - scriptforge_mysql:/var/lib/mysql
+
+volumes:
+  scriptforge_mysql:

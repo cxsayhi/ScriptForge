@@ -1,0 +1,137 @@
+type: object
+required:
+  - project
+  - characters
+  - episodes
+properties:
+  project:
+    type: object
+    required:
+      - title
+      - source_type
+      - script_type
+      - language
+      - target_episodes
+    properties:
+      title:
+        type: string
+        description: "Script title"
+      source_type:
+        type: string
+        enum:
+          - novel
+        description: "Original content type"
+      script_type:
+        type: string
+        enum:
+          - web_drama
+          - short_drama
+          - movie
+          - stage_play
+        description: "Script type"
+      language:
+        type: string
+        enum:
+          - zh-CN
+          - en-US
+        description: "Output language"
+      target_episodes:
+        type: integer
+        minimum: 1
+        description: "Target episode count"
+      summary:
+        type: string
+        description: "Whole script summary"
+  characters:
+    type: array
+    minItems: 1
+    description: "Character list"
+    items:
+      type: object
+      required:
+        - id
+        - name
+        - role
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+        description:
+          type: string
+        motivation:
+          type: string
+        relationships:
+          type: array
+          items:
+            type: object
+            required:
+              - target
+              - relation
+            properties:
+              target:
+                type: string
+              relation:
+                type: string
+  episodes:
+    type: array
+    minItems: 1
+    description: "Episode scripts"
+    items:
+      type: object
+      required:
+        - episode_id
+        - title
+        - summary
+        - scenes
+      properties:
+        episode_id:
+          type: integer
+          minimum: 1
+        title:
+          type: string
+        summary:
+          type: string
+        scenes:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required:
+              - scene_id
+              - title
+              - location
+              - time
+              - characters
+              - action
+              - dialogues
+            properties:
+              scene_id:
+                type: string
+              title:
+                type: string
+              location:
+                type: string
+              time:
+                type: string
+              characters:
+                type: array
+                minItems: 1
+                items:
+                  type: string
+              action:
+                type: string
+              dialogues:
+                type: array
+                items:
+                  type: object
+                  required:
+                    - character
+                    - line
+                  properties:
+                    character:
+                      type: string
+                    line:
+                      type: string

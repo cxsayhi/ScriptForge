@@ -1,0 +1,16 @@
+.DS_Store
+node_modules/
+frontend/.npm-cache/
+dist/
+target/
+.idea/
+.vscode/
+*.log
+*.iml
+
+storage/exports/*
+storage/novels/*
+storage/temp/*
+!storage/exports/.gitkeep
+!storage/novels/.gitkeep
+!storage/temp/.gitkeep
