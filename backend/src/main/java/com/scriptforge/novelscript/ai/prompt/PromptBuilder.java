@@ -1,5 +1,6 @@
 package com.scriptforge.novelscript.ai.prompt;
 
+import com.scriptforge.novelscript.entity.AdaptationSetting;
 import com.scriptforge.novelscript.entity.Chapter;
 import com.scriptforge.novelscript.entity.ProjectWorkspace;
 import org.springframework.core.io.ClassPathResource;
@@ -25,14 +26,19 @@ public class PromptBuilder {
     }
 
     public String buildScriptGenerationPrompt(ProjectWorkspace project) {
+        AdaptationSetting setting = project.getSetting();
         Map<String, String> variables = new HashMap<>();
         variables.put("{{novelTitle}}", project.getTitle());
         variables.put("{{chapters}}", formatChapters(project.getNovelContent().getChapters()));
-        variables.put("{{scriptType}}", project.getSetting().getScriptType());
-        variables.put("{{targetEpisodes}}", String.valueOf(project.getSetting().getTargetEpisodes()));
-        variables.put("{{style}}", project.getSetting().getStyle());
-        variables.put("{{language}}", project.getSetting().getLanguage());
-        variables.put("{{keepOriginalDialogues}}", String.valueOf(project.getSetting().isKeepOriginalDialogues()));
+        variables.put("{{scriptType}}", setting.getScriptType());
+        variables.put("{{targetEpisodes}}", String.valueOf(setting.getTargetEpisodes()));
+        variables.put("{{episodeDurationMinutes}}", String.valueOf(setting.getEpisodeDurationMinutes()));
+        variables.put("{{style}}", setting.getStyle());
+        variables.put("{{language}}", setting.getLanguage());
+        variables.put("{{adaptationIntensity}}", setting.getAdaptationIntensity());
+        variables.put("{{dialogueStyle}}", setting.getDialogueStyle());
+        variables.put("{{budgetPreference}}", setting.getBudgetPreference());
+        variables.put("{{keepOriginalDialogues}}", setting.isKeepOriginalDialogues() ? "是" : "否");
         variables.put("{{yamlSchema}}", scriptSchema);
 
         String prompt = scriptGenerationPrompt;
@@ -61,8 +67,7 @@ public class PromptBuilder {
                 return reader.lines().collect(Collectors.joining("\n"));
             }
         } catch (Exception e) {
-            return "";
+            throw new IllegalStateException("Failed to load prompt resource: " + path, e);
         }
     }
 }
-

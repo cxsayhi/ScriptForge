@@ -1,8 +1,10 @@
 package com.scriptforge.novelscript.ai.client;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 @Component
+@ConditionalOnProperty(name = "scriptforge.ai.enabled", havingValue = "false", matchIfMissing = true)
 public class MockAiClient implements AiClient {
 
     @Override
@@ -16,4 +18,3 @@ public class MockAiClient implements AiClient {
     }
 
 }
-

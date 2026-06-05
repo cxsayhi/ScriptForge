@@ -12,6 +12,7 @@ import org.springframework.web.client.RestTemplate;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 @Component
@@ -33,7 +34,7 @@ public class OpenAiCompatibleClient implements AiClient {
 
     @Override
     public String chatWithSystem(String systemPrompt, String userPrompt) {
-        String provider = properties.getProvider();
+        String provider = normalizedProvider();
 
         if ("gemini".equals(provider)) {
             return callGemini(systemPrompt, userPrompt);
@@ -62,7 +63,7 @@ public class OpenAiCompatibleClient implements AiClient {
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.setBearerAuth(apiKey);
+        headers.setBearerAuth(requireApiKey(apiKey));
 
         HttpEntity<ChatRequest> entity = new HttpEntity<>(request, headers);
 
@@ -81,7 +82,7 @@ public class OpenAiCompatibleClient implements AiClient {
 
     private String callGemini(String systemPrompt, String userPrompt) {
         String endpoint = properties.getGemini().getEndpoint();
-        String apiKey = properties.getGemini().getApiKey();
+        String apiKey = requireApiKey(properties.getGemini().getApiKey());
         String model = properties.getGemini().getModel();
         double temperature = properties.getGemini().getTemperature();
 
@@ -140,7 +141,7 @@ public class OpenAiCompatibleClient implements AiClient {
     }
 
     private String getEndpoint() {
-        return switch (properties.getProvider()) {
+        return switch (normalizedProvider()) {
             case "deepseek" -> properties.getDeepseek().getEndpoint();
             case "qwen" -> properties.getQwen().getEndpoint();
             case "gemini" -> properties.getGemini().getEndpoint();
@@ -149,7 +150,7 @@ public class OpenAiCompatibleClient implements AiClient {
     }
 
     private String getApiKey() {
-        return switch (properties.getProvider()) {
+        return switch (normalizedProvider()) {
             case "deepseek" -> properties.getDeepseek().getApiKey();
             case "qwen" -> properties.getQwen().getApiKey();
             case "gemini" -> properties.getGemini().getApiKey();
@@ -158,7 +159,7 @@ public class OpenAiCompatibleClient implements AiClient {
     }
 
     private String getModel() {
-        return switch (properties.getProvider()) {
+        return switch (normalizedProvider()) {
             case "deepseek" -> properties.getDeepseek().getModel();
             case "qwen" -> properties.getQwen().getModel();
             case "gemini" -> properties.getGemini().getModel();
@@ -167,7 +168,7 @@ public class OpenAiCompatibleClient implements AiClient {
     }
 
     private double getTemperature() {
-        return switch (properties.getProvider()) {
+        return switch (normalizedProvider()) {
             case "deepseek" -> properties.getDeepseek().getTemperature();
             case "qwen" -> properties.getQwen().getTemperature();
             case "gemini" -> properties.getGemini().getTemperature();
@@ -176,12 +177,27 @@ public class OpenAiCompatibleClient implements AiClient {
     }
 
     private int getMaxTokens() {
-        return switch (properties.getProvider()) {
+        return switch (normalizedProvider()) {
             case "deepseek" -> properties.getDeepseek().getMaxTokens();
             case "qwen" -> properties.getQwen().getMaxTokens();
             case "gemini" -> properties.getGemini().getMaxTokens();
             default -> properties.getOpenai().getMaxTokens();
         };
+    }
+
+    private String requireApiKey(String apiKey) {
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new IllegalStateException("AI API key is required when scriptforge.ai.enabled=true");
+        }
+        return apiKey;
+    }
+
+    private String normalizedProvider() {
+        String provider = properties.getProvider();
+        if (provider == null || provider.isBlank()) {
+            return "openai";
+        }
+        return provider.trim().toLowerCase(Locale.ROOT);
     }
 
     public static class ChatRequest {
@@ -210,4 +226,3 @@ public class OpenAiCompatibleClient implements AiClient {
         public Message message;
     }
 }
-
