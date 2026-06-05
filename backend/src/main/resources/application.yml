@@ -8,7 +8,31 @@ spring:
     multipart:
       max-file-size: 10MB
       max-request-size: 12MB
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${DB_URL:jdbc:mysql://localhost:3306/novel_script?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:}
+  mvc:
+    pathmatch:
+      matching-strategy: ant_path_matcher
+
+mybatis-plus:
+  mapper-locations: classpath*:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: auto
 
 scriptforge:
   storage:
     root: ../storage
+  gemini:
+    enabled: true
+    endpoint: https://generativelanguage.googleapis.com/v1beta/models
+    api-key: ${GEMINI_API_KEY}
+    model: "gemini-2.5-flash-lite"
+    thinking-budget: 0
+    max-tool-rounds: 3
+    max-conversation-messages: 12
