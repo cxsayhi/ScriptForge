@@ -4,6 +4,9 @@ export interface ApiResponse<T> {
   data: T
 }
 
+export type ProjectId = number
+export type ExportFormat = 'yaml' | 'markdown'
+
 export interface Project {
   id: number
   title: string
@@ -14,6 +17,15 @@ export interface Project {
   hasNovel: boolean
   chapterCount: number
   hasScript: boolean
+}
+
+export interface ProjectPayload {
+  title: string
+  description?: string
+}
+
+export interface ProjectUpdatePayload extends ProjectPayload {
+  status?: string
 }
 
 export interface Chapter {
@@ -29,6 +41,10 @@ export interface NovelContent {
   chapters: Chapter[]
   originalText: string
   updatedAt: string
+}
+
+export interface NovelTextPayload {
+  text: string
 }
 
 export interface AdaptationSetting {
@@ -62,7 +78,17 @@ export interface ScriptResponse {
   updatedAt: string
 }
 
+export interface ScriptUpdatePayload {
+  yaml: string
+}
+
 export interface RepairResponse {
   yaml: string
   validationResult: ValidationResult
+}
+
+export interface ExportFile {
+  blob: Blob
+  filename: string
+  format: ExportFormat
 }

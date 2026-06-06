@@ -7,6 +7,7 @@ target/
 .vscode/
 *.log
 *.iml
+.agent/
 
 storage/exports/*
 storage/novels/*
