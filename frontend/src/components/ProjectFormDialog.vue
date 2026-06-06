@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { reactive, watch } from 'vue'
+import type { Project, ProjectPayload } from '@/api/types'
 
 const props = defineProps<{
   modelValue: boolean
   loading?: boolean
+  project?: Project | null
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
-  submit: [payload: { title: string; description: string }]
+  submit: [payload: ProjectPayload]
 }>()
 
 const form = reactive({
@@ -17,13 +19,14 @@ const form = reactive({
 })
 
 watch(
-  () => props.modelValue,
-  (visible) => {
+  () => [props.modelValue, props.project] as const,
+  ([visible, project]) => {
     if (visible) {
-      form.title = ''
-      form.description = ''
+      form.title = project?.title || ''
+      form.description = project?.description || ''
     }
-  }
+  },
+  { immediate: true }
 )
 
 function submit() {
@@ -37,13 +40,13 @@ function submit() {
 <template>
   <el-dialog
     :model-value="modelValue"
-    title="新建改编项目"
+    :title="project ? '编辑改编项目' : '新建改编项目'"
     width="520px"
     @update:model-value="emit('update:modelValue', $event)"
   >
     <el-form label-position="top" @submit.prevent="submit">
       <el-form-item label="项目标题" required>
-        <el-input v-model="form.title" maxlength="80" placeholder="例如：雨夜来信改编" />
+        <el-input v-model="form.title" maxlength="80" show-word-limit placeholder="例如：雨夜来信改编" />
       </el-form-item>
       <el-form-item label="项目备注">
         <el-input
@@ -59,7 +62,7 @@ function submit() {
     <template #footer>
       <el-button @click="emit('update:modelValue', false)">取消</el-button>
       <el-button type="primary" :loading="loading" :disabled="!form.title.trim()" @click="submit">
-        创建
+        {{ project ? '保存' : '创建' }}
       </el-button>
     </template>
   </el-dialog>
