@@ -3,9 +3,11 @@ package com.scriptforge.novelscript.controller;
 import com.scriptforge.novelscript.common.ApiResponse;
 import com.scriptforge.novelscript.dto.request.ScriptUpdateRequest;
 import com.scriptforge.novelscript.dto.response.RepairResponse;
+import com.scriptforge.novelscript.dto.response.ScriptQualityResponse;
 import com.scriptforge.novelscript.dto.response.ScriptResponse;
 import com.scriptforge.novelscript.dto.response.ValidationResult;
 import com.scriptforge.novelscript.entity.GenerationStatus;
+import com.scriptforge.novelscript.service.ScriptQualityService;
 import com.scriptforge.novelscript.service.ScriptService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -21,9 +23,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class ScriptController {
 
     private final ScriptService scriptService;
+    private final ScriptQualityService scriptQualityService;
 
-    public ScriptController(ScriptService scriptService) {
+    public ScriptController(ScriptService scriptService, ScriptQualityService scriptQualityService) {
         this.scriptService = scriptService;
+        this.scriptQualityService = scriptQualityService;
     }
 
     @PostMapping("/generate")
@@ -61,5 +65,11 @@ public class ScriptController {
     public ApiResponse<RepairResponse> repair(@PathVariable Long projectId, @RequestBody(required = false) ScriptUpdateRequest request) {
         String yaml = request == null ? null : request.yaml();
         return ApiResponse.success(scriptService.repair(projectId, yaml));
+    }
+
+    @PostMapping("/quality-check")
+    public ApiResponse<ScriptQualityResponse> qualityCheck(@PathVariable Long projectId, @RequestBody(required = false) ScriptUpdateRequest request) {
+        String yaml = request == null ? null : request.yaml();
+        return ApiResponse.success(scriptQualityService.check(projectId, yaml));
     }
 }
