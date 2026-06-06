@@ -198,30 +198,6 @@ select {
   font-family: "Iowan Old Style", "Noto Serif SC", serif;
 }
 
-.project-board {
-  min-height: 360px;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 18px;
-}
-
-.project-card {
-  min-height: 230px;
-  padding: 20px;
-  border: 1px solid var(--sf-border);
-  border-radius: 8px;
-  background: var(--sf-panel);
-  box-shadow: 0 2px 0 rgba(32, 40, 39, 0.08);
-  cursor: pointer;
-  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
-}
-
-.project-card:hover {
-  transform: translateY(-3px);
-  border-color: rgba(23, 111, 99, 0.55);
-  box-shadow: var(--sf-shadow);
-}
-
 .project-card-top,
 .panel-heading,
 .panel-actions,
@@ -233,35 +209,12 @@ select {
   gap: 16px;
 }
 
-.project-card h2,
 .workspace-panel h2 {
   margin: 0;
   font-family: "Iowan Old Style", "Noto Serif SC", "Songti SC", serif;
   font-size: 25px;
   line-height: 1.15;
   letter-spacing: 0;
-}
-
-.project-card h2 {
-  margin-top: 24px;
-}
-
-.project-card p {
-  margin: 14px 0 0;
-  min-height: 48px;
-  color: var(--sf-muted);
-  line-height: 1.7;
-}
-
-.project-meta {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 26px;
-  padding-top: 14px;
-  border-top: 1px solid var(--sf-border);
-  color: var(--sf-muted);
-  font-size: 13px;
 }
 
 .workspace-shell {
@@ -329,6 +282,198 @@ select {
   font-size: 25px;
   line-height: 1.15;
   letter-spacing: 0;
+}
+
+.project-index-layout,
+.project-detail-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(310px, 0.65fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.project-index-panel {
+  min-height: 420px;
+}
+
+.project-flow-panel {
+  position: sticky;
+  top: 18px;
+}
+
+.project-board {
+  min-height: 360px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 18px;
+}
+
+.project-card {
+  display: flex;
+  min-height: 260px;
+  padding: 20px;
+  border: 1px solid var(--sf-border);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(17, 104, 95, 0.08), transparent 42%),
+    var(--sf-panel);
+  box-shadow: 0 2px 0 rgba(32, 40, 39, 0.08);
+  cursor: pointer;
+  flex-direction: column;
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.project-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(17, 104, 95, 0.55);
+  box-shadow: var(--sf-shadow);
+}
+
+.card-action-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.project-card h2,
+.workflow-card h2 {
+  margin: 22px 0 0;
+  font-family: "Iowan Old Style", "Noto Serif SC", "Songti SC", serif;
+  font-size: 25px;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+.project-card p,
+.workflow-card p {
+  margin: 14px 0 0;
+  color: var(--sf-muted);
+  line-height: 1.7;
+}
+
+.project-card p {
+  min-height: 74px;
+}
+
+.project-progress-row {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.project-progress-row span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--sf-border);
+  border-radius: 999px;
+  color: var(--sf-muted);
+  background: rgba(242, 246, 239, 0.82);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.project-progress-row span.ready {
+  border-color: rgba(17, 104, 95, 0.32);
+  color: var(--sf-accent-strong);
+  background: rgba(17, 104, 95, 0.1);
+}
+
+.project-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--sf-border);
+  color: var(--sf-muted);
+  font-size: 13px;
+}
+
+.project-empty {
+  min-height: 320px;
+  display: grid;
+  place-items: center;
+}
+
+.project-status-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 54px;
+  padding: 0 16px;
+  border: 1px solid var(--sf-border);
+  background: var(--sf-panel-strong);
+}
+
+.status-row span {
+  color: var(--sf-muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.status-row strong {
+  color: var(--sf-warm);
+  font-size: 15px;
+}
+
+.status-row.ready strong {
+  color: var(--sf-accent);
+}
+
+.project-workflow-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.workflow-card {
+  display: block;
+  min-height: 210px;
+  padding: 20px;
+  border: 1px solid var(--sf-border);
+  border-radius: 8px;
+  color: var(--sf-ink);
+  background: rgba(251, 252, 246, 0.92);
+  text-decoration: none;
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.workflow-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(17, 104, 95, 0.5);
+  box-shadow: 0 10px 28px rgba(20, 35, 32, 0.08);
+}
+
+.workflow-card.disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.workflow-card.disabled:hover {
+  transform: none;
+  border-color: var(--sf-border);
+  box-shadow: none;
+}
+
+.workflow-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workflow-card-top .el-icon {
+  color: var(--sf-accent);
+  font-size: 24px;
 }
 
 .placeholder-card-grid {
@@ -701,8 +846,19 @@ select {
   .schema-grid,
   .import-grid,
   .placeholder-layout,
-  .placeholder-layout.wide-left {
+  .placeholder-layout.wide-left,
+  .project-index-layout,
+  .project-detail-layout,
+  .project-workflow-grid {
     grid-template-columns: 1fr;
+  }
+
+  .project-flow-panel {
+    position: static;
+  }
+
+  .project-card {
+    min-height: 230px;
   }
 
   .settings-form {
