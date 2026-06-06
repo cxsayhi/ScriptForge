@@ -5,9 +5,11 @@ import com.scriptforge.novelscript.dto.request.AdaptationSettingRequest;
 import com.scriptforge.novelscript.dto.request.ProjectCreateRequest;
 import com.scriptforge.novelscript.dto.response.NovelResponse;
 import com.scriptforge.novelscript.dto.response.ProjectResponse;
+import com.scriptforge.novelscript.dto.response.ScriptResponse;
 import com.scriptforge.novelscript.entity.AdaptationSetting;
 import com.scriptforge.novelscript.mapper.AdaptationSettingMapper;
 import com.scriptforge.novelscript.mapper.NovelContentMapper;
+import com.scriptforge.novelscript.mapper.ScriptResultMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -41,13 +43,23 @@ class PersistenceServiceTests {
     private SettingService settingService;
 
     @Autowired
+    private ScriptService scriptService;
+
+    @Autowired
+    private ExportService exportService;
+
+    @Autowired
     private NovelContentMapper novelContentMapper;
 
     @Autowired
     private AdaptationSettingMapper adaptationSettingMapper;
 
+    @Autowired
+    private ScriptResultMapper scriptResultMapper;
+
     @BeforeEach
     void setUpDatabase() {
+        jdbcTemplate.execute("DROP TABLE IF EXISTS script_result");
         jdbcTemplate.execute("DROP TABLE IF EXISTS adaptation_setting");
         jdbcTemplate.execute("DROP TABLE IF EXISTS novel_content");
         jdbcTemplate.execute("DROP TABLE IF EXISTS project");
@@ -86,6 +98,16 @@ class PersistenceServiceTests {
                     keep_original_dialogues BOOLEAN NOT NULL,
                     updated_at DATETIME NOT NULL,
                     CONSTRAINT fk_setting_project FOREIGN KEY (project_id) REFERENCES project(id)
+                )
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE script_result (
+                    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                    project_id BIGINT NOT NULL,
+                    yaml LONGTEXT NOT NULL,
+                    validation_status VARCHAR(40) NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    CONSTRAINT fk_script_project FOREIGN KEY (project_id) REFERENCES project(id)
                 )
                 """);
     }
@@ -152,6 +174,7 @@ class PersistenceServiceTests {
     void deleteProjectRemovesProjectNovelAndSettingRows() {
         ProjectResponse project = projectService.create(new ProjectCreateRequest("雨夜来信", "联调项目"));
         novelService.saveText(project.id(), sampleNovelText());
+        scriptService.generate(project.id());
 
         projectService.delete(project.id());
 
@@ -160,6 +183,26 @@ class PersistenceServiceTests {
                 .hasMessage("项目不存在");
         assertThat(novelContentMapper.selectCount(null)).isZero();
         assertThat(adaptationSettingMapper.selectCount(null)).isZero();
+        assertThat(scriptResultMapper.selectCount(null)).isZero();
+    }
+
+    @Test
+    void generateGetAndExportScriptUsePersistedResult() {
+        ProjectResponse project = projectService.create(new ProjectCreateRequest("雨夜来信", "联调项目"));
+        novelService.saveText(project.id(), sampleNovelText());
+
+        ScriptResponse generated = scriptService.generate(project.id());
+        ScriptResponse fetched = scriptService.get(project.id());
+        ProjectResponse fetchedProject = projectService.getResponse(project.id());
+
+        assertThat(generated.validationResult().valid()).isTrue();
+        assertThat(fetched.yaml()).isEqualTo(generated.yaml());
+        assertThat(fetched.yaml()).contains("project:", "episodes:");
+        assertThat(fetchedProject.status()).isEqualTo("script_ready");
+        assertThat(fetchedProject.hasScript()).isTrue();
+        assertThat(exportService.yaml(project.id())).isEqualTo(generated.yaml());
+        assertThat(exportService.markdown(project.id())).contains("# 雨夜来信", "## Episodes");
+        assertThat(scriptResultMapper.selectCount(null)).isEqualTo(1);
     }
 
     private String sampleNovelText() {
