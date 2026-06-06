@@ -30,7 +30,7 @@ scriptforge:
     root: ../storage
   ai:
     enabled: ${AI_ENABLED:false}
-    provider: ${AI_PROVIDER:openai}
+    provider: ${AI_PROVIDER:gemini}
     gemini:
       endpoint: ${GEMINI_ENDPOINT:https://generativelanguage.googleapis.com/v1beta/models}
       api-key: ${GEMINI_API_KEY:}
