@@ -115,6 +115,19 @@ class YamlScriptValidatorTests {
     }
 
     @Test
+    void repairConvertsUnsafeDoubleQuotedScalarsToSingleQuotedScalars() {
+        String repaired = validator.repair(validYaml().replace(
+                "summary: 林秋收到匿名信并前往旧剧院。",
+                "summary: \"在一个雨夜，林秋收到一封神秘的匿名信，信中只提到了\"旧剧院\"和\"午夜\"。\""
+        ));
+
+        assertThat(repaired)
+                .contains("summary: '在一个雨夜")
+                .contains("\"旧剧院\"和\"午夜\"");
+        assertThat(validator.validate(repaired).valid()).isTrue();
+    }
+
+    @Test
     void repairStripsLeadingAndTrailingNarrationWithoutCodeFence() {
         String repaired = validator.repair("""
                 我将直接给出 YAML：

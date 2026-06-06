@@ -46,6 +46,23 @@ class LlmScriptGenerationAgentTests {
     }
 
     @Test
+    void generateRepairsUnsafeDoubleQuotesFromMockClientBeforeFallback() {
+        RecordingAiClient client = new RecordingAiClient(validYaml("Gemini 版剧本").replace(
+                "summary: 模型生成的剧本初稿",
+                "summary: \"在一个雨夜，林秋收到一封神秘的匿名信，信中只提到了\"旧剧院\"和\"午夜\"。\""
+        ));
+        LlmScriptGenerationAgent agent = createAgent(client);
+
+        String yaml = agent.generate(sampleProject());
+
+        assertThat(validator.validate(yaml).valid()).isTrue();
+        assertThat(yaml)
+                .contains("title: Gemini 版剧本")
+                .contains("\"旧剧院\"和\"午夜\"")
+                .doesNotContain("name: 主角");
+    }
+
+    @Test
     void generateFallsBackWhenMockClientReturnsInvalidYaml() {
         RecordingAiClient client = new RecordingAiClient("project:\n  title: 缺少必要结构\n");
         LlmScriptGenerationAgent agent = createAgent(client);
