@@ -58,6 +58,14 @@ public class ProjectWorkspace {
         return updatedAt;
     }
 
+    public void setCreatedAt(Instant createdAt) {
+        this.createdAt = createdAt;
+    }
+
+    public void setUpdatedAt(Instant updatedAt) {
+        this.updatedAt = updatedAt;
+    }
+
     public NovelContent getNovelContent() {
         return novelContent;
     }
