@@ -21,6 +21,7 @@ public class YamlScriptValidator {
     private static final Pattern DASH_KEY_WITHOUT_SPACE = Pattern.compile("^(\\s*)-([A-Za-z_][\\w-]*:.*)$");
     private static final Pattern KEY_VALUE_WITHOUT_SPACE = Pattern.compile("^(\\s*(?:-\\s*)?[A-Za-z_][\\w-]*):([^\\s\"'].*)$");
     private static final Pattern FULL_WIDTH_KEY_SEPARATOR = Pattern.compile("^(\\s*(?:-\\s*)?[A-Za-z_][\\w-]*)：(.*)$");
+    private static final Pattern DOUBLE_QUOTED_SCALAR = Pattern.compile("^(\\s*(?:-\\s*)?[A-Za-z_][\\w-]*:\\s*)\"(.*)\"\\s*$");
     private static final Set<String> SCRIPT_TYPES = Set.of("web_drama", "short_drama", "movie", "stage_play");
     private static final Set<String> LANGUAGES = Set.of("zh-CN", "en-US");
     private static final List<String> ROOT_KEYS = List.of("project:", "characters:", "episodes:");
@@ -364,6 +365,38 @@ public class YamlScriptValidator {
             repaired = keyValueMatcher.group(1) + ": " + keyValueMatcher.group(2);
         }
 
+        repaired = repairUnsafeDoubleQuotedScalar(repaired);
+
         return repaired.stripTrailing();
+    }
+
+    private String repairUnsafeDoubleQuotedScalar(String line) {
+        Matcher matcher = DOUBLE_QUOTED_SCALAR.matcher(line);
+        if (!matcher.matches()) {
+            return line;
+        }
+
+        String value = matcher.group(2);
+        if (!hasUnsafeDoubleQuote(value)) {
+            return line;
+        }
+        return matcher.group(1) + "'" + value.replace("'", "''") + "'";
+    }
+
+    private boolean hasUnsafeDoubleQuote(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            if (value.charAt(i) == '"' && !isEscaped(value, i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isEscaped(String value, int quoteIndex) {
+        int slashCount = 0;
+        for (int i = quoteIndex - 1; i >= 0 && value.charAt(i) == '\\'; i--) {
+            slashCount++;
+        }
+        return slashCount % 2 == 1;
     }
 }
