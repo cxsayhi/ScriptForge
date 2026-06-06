@@ -8,12 +8,15 @@ import com.scriptforge.novelscript.dto.response.ProjectResponse;
 import com.scriptforge.novelscript.entity.AdaptationSetting;
 import com.scriptforge.novelscript.entity.NovelContent;
 import com.scriptforge.novelscript.entity.ProjectWorkspace;
+import com.scriptforge.novelscript.entity.ScriptResult;
 import com.scriptforge.novelscript.entity.persistence.AdaptationSettingRecord;
 import com.scriptforge.novelscript.entity.persistence.NovelContentRecord;
 import com.scriptforge.novelscript.entity.persistence.ProjectRecord;
+import com.scriptforge.novelscript.entity.persistence.ScriptResultRecord;
 import com.scriptforge.novelscript.mapper.AdaptationSettingMapper;
 import com.scriptforge.novelscript.mapper.NovelContentMapper;
 import com.scriptforge.novelscript.mapper.ProjectMapper;
+import com.scriptforge.novelscript.mapper.ScriptResultMapper;
 import com.scriptforge.novelscript.util.ChapterJsonConverter;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -30,15 +33,18 @@ public class ProjectService {
     private final ProjectMapper projectMapper;
     private final NovelContentMapper novelContentMapper;
     private final AdaptationSettingMapper adaptationSettingMapper;
+    private final ScriptResultMapper scriptResultMapper;
     private final ChapterJsonConverter chapterJsonConverter;
 
     public ProjectService(ProjectMapper projectMapper,
                           NovelContentMapper novelContentMapper,
                           AdaptationSettingMapper adaptationSettingMapper,
+                          ScriptResultMapper scriptResultMapper,
                           ChapterJsonConverter chapterJsonConverter) {
         this.projectMapper = projectMapper;
         this.novelContentMapper = novelContentMapper;
         this.adaptationSettingMapper = adaptationSettingMapper;
+        this.scriptResultMapper = scriptResultMapper;
         this.chapterJsonConverter = chapterJsonConverter;
     }
 
@@ -96,6 +102,7 @@ public class ProjectService {
     @Transactional
     public void delete(Long projectId) {
         requireProjectRecord(projectId);
+        scriptResultMapper.delete(new QueryWrapper<ScriptResultRecord>().eq("project_id", projectId));
         novelContentMapper.delete(new QueryWrapper<NovelContentRecord>().eq("project_id", projectId));
         adaptationSettingMapper.delete(new QueryWrapper<AdaptationSettingRecord>().eq("project_id", projectId));
         projectMapper.deleteById(projectId);
@@ -123,6 +130,13 @@ public class ProjectService {
         projectMapper.updateById(record);
     }
 
+    void markScriptReady(Long projectId) {
+        ProjectRecord record = requireProjectRecord(projectId);
+        record.setStatus("script_ready");
+        record.setUpdatedAt(LocalDateTime.now());
+        projectMapper.updateById(record);
+    }
+
     private ProjectWorkspace toWorkspace(ProjectRecord record) {
         ProjectWorkspace project = new ProjectWorkspace();
         project.setId(record.getId());
@@ -133,6 +147,7 @@ public class ProjectService {
         project.setUpdatedAt(toInstant(record.getUpdatedAt()));
         applyNovelContent(project);
         applyAdaptationSetting(project);
+        applyScriptResult(project);
         project.setUpdatedAt(toInstant(record.getUpdatedAt()));
         return project;
     }
@@ -154,6 +169,16 @@ public class ProjectService {
             return;
         }
         project.setSetting(toSetting(record));
+    }
+
+    private void applyScriptResult(ProjectWorkspace project) {
+        ScriptResultRecord record = findScriptResult(project.getId());
+        if (record == null) {
+            return;
+        }
+        ScriptResult scriptResult = project.getScriptResult();
+        scriptResult.setYaml(record.getYaml());
+        scriptResult.setUpdatedAt(toInstant(record.getUpdatedAt()));
     }
 
     private AdaptationSetting toSetting(AdaptationSettingRecord record) {
@@ -198,6 +223,15 @@ public class ProjectService {
     NovelContentRecord findNovelContent(Long projectId) {
         List<NovelContentRecord> records = novelContentMapper.selectList(
                 new QueryWrapper<NovelContentRecord>()
+                        .eq("project_id", projectId)
+                        .orderByDesc("updated_at")
+        );
+        return records.isEmpty() ? null : records.get(0);
+    }
+
+    ScriptResultRecord findScriptResult(Long projectId) {
+        List<ScriptResultRecord> records = scriptResultMapper.selectList(
+                new QueryWrapper<ScriptResultRecord>()
                         .eq("project_id", projectId)
                         .orderByDesc("updated_at")
         );
