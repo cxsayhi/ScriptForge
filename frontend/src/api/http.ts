@@ -1,4 +1,4 @@
-import axios, { AxiosError } from 'axios'
+import axios, { AxiosError, type AxiosResponse } from 'axios'
 import { ElMessage } from 'element-plus'
 import type { ApiResponse } from './types'
 
@@ -9,19 +9,44 @@ const http = axios.create({
   timeout: 20000
 })
 
+function resolveHttpErrorMessage(error: AxiosError<Partial<ApiResponse<unknown>>>): string {
+  const status = error.response?.status
+  const serverMessage = error.response?.data?.message
+
+  if (serverMessage) {
+    return serverMessage
+  }
+
+  if (status === 400) {
+    return '请求参数有误，请检查输入内容'
+  }
+
+  if (status === 404) {
+    return '请求的资源不存在'
+  }
+
+  if (status && status >= 500) {
+    return '服务器暂时无法处理请求'
+  }
+
+  return error.message || '请求失败'
+}
+
 http.interceptors.response.use(
   (response) => response,
-  (error: AxiosError<ApiResponse<unknown>>) => {
-    const message = error.response?.data?.message || error.message || '请求失败'
+  (error: AxiosError<Partial<ApiResponse<unknown>>>) => {
+    const message = resolveHttpErrorMessage(error)
     ElMessage.error(message)
     return Promise.reject(error)
   }
 )
 
-export async function unwrap<T>(request: Promise<{ data: ApiResponse<T> }>): Promise<T> {
+export async function unwrap<T>(request: Promise<AxiosResponse<ApiResponse<T>>>): Promise<T> {
   const response = await request
   if (response.data.code !== 200) {
-    throw new Error(response.data.message)
+    const message = response.data.message || '请求失败'
+    ElMessage.error(message)
+    throw new Error(message)
   }
   return response.data.data
 }
