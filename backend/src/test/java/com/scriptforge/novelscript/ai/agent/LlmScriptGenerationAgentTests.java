@@ -55,6 +55,48 @@ class LlmScriptGenerationAgentTests {
     }
 
     @Test
+    void generateParsesJsonWithLanguageMarkerWithoutFences() {
+        RecordingAiClient client = new RecordingAiClient(
+                "json\n" + outlineJson(),
+                "json\n" + episodeJson(1, "雨夜来信", "林秋收到匿名信并决定出门。"),
+                "json\n" + episodeJson(2, "旧剧院", "林秋在旧剧院发现旧照片。"),
+                "json\n" + episodeJson(3, "回声", "林秋用回声线索锁定真相。")
+        );
+        LlmScriptGenerationAgent agent = createAgent(client);
+
+        String yaml = agent.generate(sampleProject());
+
+        assertThat(validator.validate(yaml).valid()).isTrue();
+        assertThat(yaml)
+                .contains("title: JSON 分段剧本")
+                .contains("title: 第3集：回声")
+                .doesNotContain("name: 主角");
+    }
+
+    @Test
+    void generateRepairsUnparseableOutlineBeforeRuleBasedFallback() {
+        RecordingAiClient client = new RecordingAiClient(
+                "我将先解释生成思路，但这里没有返回可解析结构。",
+                outlineJson(),
+                episodeJson(1, "雨夜来信", "林秋收到匿名信并决定出门。"),
+                episodeJson(2, "旧剧院", "林秋在旧剧院发现旧照片。"),
+                episodeJson(3, "回声", "林秋用回声线索锁定真相。")
+        );
+        LlmScriptGenerationAgent agent = createAgent(client);
+
+        String yaml = agent.generate(sampleProject());
+
+        assertThat(validator.validate(yaml).valid()).isTrue();
+        assertThat(yaml)
+                .contains("title: JSON 分段剧本")
+                .doesNotContain("name: 主角")
+                .doesNotContain("根据 3 个章节");
+        assertThat(client.schemaNames)
+                .containsExactly("script_outline", "script_outline", "script_episode", "script_episode", "script_episode");
+        assertThat(client.userPrompts.get(1)).contains("could not be parsed");
+    }
+
+    @Test
     void generateRetriesWithLlmRepairBeforeRuleBasedFallback() {
         RecordingAiClient client = new RecordingAiClient(
                 scriptJson("缺角色的 JSON 剧本", false),

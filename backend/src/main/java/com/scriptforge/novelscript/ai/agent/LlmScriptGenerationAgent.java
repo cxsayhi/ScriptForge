@@ -93,7 +93,15 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
                 );
             }
         } catch (RuntimeException exception) {
-            log.warn("LLM script generation failed, falling back to rule-based agent: {}", exception.getMessage());
+            if (exception instanceof StructuredResponseException structuredException) {
+                log.warn(
+                        "LLM script generation failed, falling back to rule-based agent: {}. raw={}",
+                        structuredException.getMessage(),
+                        preview(structuredException.raw())
+                );
+            } else {
+                log.warn("LLM script generation failed, falling back to rule-based agent: {}", exception.getMessage());
+            }
             log.debug("LLM script generation failure details", exception);
         }
         return fallbackAgent.generate(project);
@@ -106,7 +114,13 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
                 "script_outline",
                 outlineSchema()
         );
-        Map<String, Object> outline = parseStructuredMap(outlineRaw, project);
+        Map<String, Object> outline = parseMapOrRepair(
+                outlineRaw,
+                project,
+                "script_outline",
+                outlineSchema(),
+                "outline planning response"
+        );
         if (containsCompleteScript(outline)) {
             return new Draft(toYaml(outline, project), outlineRaw);
         }
@@ -128,7 +142,25 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
                     episodeEnvelopeSchema()
             );
             raw.append("\n\n--- episode ").append(episodeIndex).append(" raw ---\n").append(episodeRaw);
-            episodes.add(extractEpisode(parseStructuredValue(episodeRaw, project), episodeIndex));
+            Object parsedEpisode = parseValueOrRepair(
+                    episodeRaw,
+                    project,
+                    "script_episode",
+                    episodeEnvelopeSchema(),
+                    "episode " + episodeIndex + " response"
+            );
+            try {
+                episodes.add(extractEpisode(parsedEpisode, episodeIndex));
+            } catch (RuntimeException exception) {
+                Object repairedEpisode = repairStructuredResponse(
+                        episodeRaw,
+                        project,
+                        "script_episode",
+                        episodeEnvelopeSchema(),
+                        "episode " + episodeIndex + " response did not contain the requested episode: " + exception.getMessage()
+                );
+                episodes.add(extractEpisode(repairedEpisode, episodeIndex));
+            }
         }
         root.put("episodes", episodes);
         return new Draft(toYaml(root, project), raw.toString());
@@ -149,6 +181,76 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
             log.debug("LLM script repair retry failure details", exception);
             return null;
         }
+    }
+
+    private Map<String, Object> parseMapOrRepair(String response,
+                                                 ProjectWorkspace project,
+                                                 String schemaName,
+                                                 Map<String, Object> schema,
+                                                 String context) {
+        try {
+            return parseStructuredMap(response, project);
+        } catch (RuntimeException exception) {
+            Object repaired = repairStructuredResponse(response, project, schemaName, schema, context + ": " + exception.getMessage());
+            if (repaired instanceof Map<?, ?> map) {
+                return mutableMap(map);
+            }
+            throw new StructuredResponseException("LLM repaired response root is not an object", String.valueOf(repaired), exception);
+        }
+    }
+
+    private Object parseValueOrRepair(String response,
+                                      ProjectWorkspace project,
+                                      String schemaName,
+                                      Map<String, Object> schema,
+                                      String context) {
+        try {
+            return parseStructuredValue(response, project);
+        } catch (RuntimeException exception) {
+            return repairStructuredResponse(response, project, schemaName, schema, context + ": " + exception.getMessage());
+        }
+    }
+
+    private Object repairStructuredResponse(String response,
+                                            ProjectWorkspace project,
+                                            String schemaName,
+                                            Map<String, Object> schema,
+                                            String context) {
+        String repairRaw = aiClient.chatJsonWithSystem(
+                REPAIR_SYSTEM_PROMPT,
+                buildRawResponseRepairPrompt(project, response, context),
+                schemaName,
+                schema
+        );
+        try {
+            return parseStructuredValue(repairRaw, project);
+        } catch (RuntimeException exception) {
+            throw new StructuredResponseException(
+                    "LLM response is not valid JSON or repairable YAML after repair retry: " + exception.getMessage(),
+                    repairRaw,
+                    exception
+            );
+        }
+    }
+
+    private String buildRawResponseRepairPrompt(ProjectWorkspace project, String rawResponse, String context) {
+        return """
+                The previous model response could not be parsed by the backend.
+                Convert it into valid JSON matching the requested schema.
+
+                Context:
+                %s
+
+                Project settings:
+                %s
+
+                Raw response:
+                %s
+                """.formatted(
+                context,
+                settingsBlock(project),
+                rawResponse
+        );
     }
 
     private String buildOutlinePrompt(ProjectWorkspace project) {
@@ -237,7 +339,7 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
         if (parsed instanceof Map<?, ?> map) {
             return mutableMap(map);
         }
-        throw new IllegalStateException("LLM response root is not an object");
+        throw new StructuredResponseException("LLM response root is not an object", response);
     }
 
     private Object parseStructuredValue(String response, ProjectWorkspace project) {
@@ -254,15 +356,20 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
         try {
             return new Yaml().load(repairedYaml);
         } catch (YAMLException exception) {
-            throw new IllegalStateException("LLM response is not valid JSON or repairable YAML", exception);
+            throw new StructuredResponseException("LLM response is not valid JSON or repairable YAML", response, exception);
         }
     }
 
     private Object parseJson(String response) {
         for (String candidate : jsonCandidates(response)) {
             try {
-                return OBJECT_MAPPER.readValue(candidate, new TypeReference<>() {
+                Object parsed = OBJECT_MAPPER.readValue(candidate, new TypeReference<>() {
                 });
+                if (parsed instanceof String embedded && looksStructured(embedded)) {
+                    Object embeddedParsed = parseJson(embedded);
+                    return embeddedParsed == null ? parsed : embeddedParsed;
+                }
+                return parsed;
             } catch (JsonProcessingException ignored) {
                 // Try the next candidate; LLMs often wrap JSON in fences or stray text.
             }
@@ -274,10 +381,12 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
         String trimmed = response.trim();
         List<String> candidates = new ArrayList<>();
         candidates.add(trimmed);
+        candidates.add(stripFenceLanguageMarker(trimmed));
 
         String fenced = extractFencedBlock(trimmed);
         if (fenced != null) {
             candidates.add(fenced);
+            candidates.add(stripFenceLanguageMarker(fenced));
         }
 
         int objectStart = trimmed.indexOf('{');
@@ -294,23 +403,47 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
         return candidates;
     }
 
+    private boolean looksStructured(String value) {
+        String trimmed = value == null ? "" : value.trim();
+        return trimmed.startsWith("{")
+                || trimmed.startsWith("[")
+                || trimmed.startsWith("```")
+                || trimmed.startsWith("project:")
+                || trimmed.startsWith("characters:")
+                || trimmed.startsWith("episodes:")
+                || trimmed.startsWith("- episode_id:");
+    }
+
     private String extractFencedBlock(String response) {
         int opening = response.indexOf("```");
         if (opening < 0) {
             return null;
         }
 
-        int contentStart = response.indexOf('\n', opening);
-        if (contentStart < 0) {
-            return null;
-        }
-
-        int closing = response.indexOf("```", contentStart + 1);
+        int contentStart = opening + 3;
+        int closing = response.indexOf("```", contentStart);
         if (closing < 0) {
             return null;
         }
 
-        return response.substring(contentStart + 1, closing).trim();
+        return stripFenceLanguageMarker(response.substring(contentStart, closing).trim());
+    }
+
+    private String stripFenceLanguageMarker(String value) {
+        String trimmed = value == null ? "" : value.trim();
+        if (trimmed.startsWith("json\n") || trimmed.startsWith("yaml\n") || trimmed.startsWith("yml\n")) {
+            return trimmed.substring(trimmed.indexOf('\n') + 1).trim();
+        }
+        if (trimmed.startsWith("json ")) {
+            return trimmed.substring(5).trim();
+        }
+        if (trimmed.startsWith("yaml ")) {
+            return trimmed.substring(5).trim();
+        }
+        if (trimmed.startsWith("yml ")) {
+            return trimmed.substring(4).trim();
+        }
+        return trimmed;
     }
 
     private String toYaml(Object value, ProjectWorkspace project) {
@@ -666,5 +799,24 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
     }
 
     private record Draft(String yaml, String raw) {
+    }
+
+    private static class StructuredResponseException extends RuntimeException {
+
+        private final String raw;
+
+        StructuredResponseException(String message, String raw) {
+            super(message);
+            this.raw = raw;
+        }
+
+        StructuredResponseException(String message, String raw, Throwable cause) {
+            super(message, cause);
+            this.raw = raw;
+        }
+
+        String raw() {
+            return raw;
+        }
     }
 }
