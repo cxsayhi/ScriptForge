@@ -1,11 +1,14 @@
 package com.scriptforge.novelscript.ai.client;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scriptforge.novelscript.ai.config.AiModelProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
@@ -19,11 +22,13 @@ import java.util.Map;
 @ConditionalOnProperty(name = "scriptforge.ai.enabled", havingValue = "true")
 public class OpenAiCompatibleClient implements AiClient {
 
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
     private final RestTemplate restTemplate;
     private final AiModelProperties properties;
 
     public OpenAiCompatibleClient(AiModelProperties properties) {
-        this.restTemplate = new RestTemplate();
+        this.restTemplate = new RestTemplate(requestFactory(properties));
         this.properties = properties;
     }
 
@@ -34,16 +39,28 @@ public class OpenAiCompatibleClient implements AiClient {
 
     @Override
     public String chatWithSystem(String systemPrompt, String userPrompt) {
+        return chatWithSystem(systemPrompt, userPrompt, null, null);
+    }
+
+    @Override
+    public String chatJsonWithSystem(String systemPrompt,
+                                     String userPrompt,
+                                     String schemaName,
+                                     Map<String, Object> jsonSchema) {
+        return chatWithSystem(systemPrompt, appendJsonSchemaInstruction(userPrompt, schemaName, jsonSchema), schemaName, jsonSchema);
+    }
+
+    private String chatWithSystem(String systemPrompt, String userPrompt, String schemaName, Map<String, Object> jsonSchema) {
         String provider = normalizedProvider();
 
         if ("gemini".equals(provider)) {
-            return callGemini(systemPrompt, userPrompt);
+            return callGemini(systemPrompt, userPrompt, jsonSchema);
         } else {
-            return callOpenAiCompatible(systemPrompt, userPrompt);
+            return callOpenAiCompatible(systemPrompt, userPrompt, schemaName, jsonSchema);
         }
     }
 
-    private String callOpenAiCompatible(String systemPrompt, String userPrompt) {
+    private String callOpenAiCompatible(String systemPrompt, String userPrompt, String schemaName, Map<String, Object> jsonSchema) {
         String endpoint = getEndpoint();
         String apiKey = getApiKey();
         String model = getModel();
@@ -55,6 +72,9 @@ public class OpenAiCompatibleClient implements AiClient {
         request.temperature = temperature;
         request.maxTokens = maxTokens;
         request.messages = new ArrayList<>();
+        if (jsonSchema != null && !jsonSchema.isEmpty()) {
+            request.responseFormat = responseFormat(schemaName, jsonSchema);
+        }
 
         if (systemPrompt != null && !systemPrompt.isBlank()) {
             request.messages.add(new Message("system", systemPrompt));
@@ -80,7 +100,7 @@ public class OpenAiCompatibleClient implements AiClient {
         throw new RuntimeException("AI response is empty");
     }
 
-    private String callGemini(String systemPrompt, String userPrompt) {
+    private String callGemini(String systemPrompt, String userPrompt, Map<String, Object> jsonSchema) {
         String endpoint = properties.getGemini().getEndpoint();
         String apiKey = requireApiKey(properties.getGemini().getApiKey());
         String model = properties.getGemini().getModel();
@@ -107,6 +127,10 @@ public class OpenAiCompatibleClient implements AiClient {
         Map<String, Object> generationConfig = new HashMap<>();
         generationConfig.put("temperature", temperature);
         generationConfig.put("maxOutputTokens", properties.getGemini().getMaxTokens());
+        if (jsonSchema != null && !jsonSchema.isEmpty()) {
+            generationConfig.put("responseMimeType", "application/json");
+            generationConfig.put("responseSchema", jsonSchema);
+        }
         requestBody.put("generationConfig", generationConfig);
 
         HttpHeaders headers = new HttpHeaders();
@@ -138,6 +162,48 @@ public class OpenAiCompatibleClient implements AiClient {
         }
 
         throw new RuntimeException("Gemini response is empty");
+    }
+
+    private Map<String, Object> responseFormat(String schemaName, Map<String, Object> jsonSchema) {
+        if ("openai".equals(normalizedProvider())) {
+            Map<String, Object> schemaConfig = new HashMap<>();
+            schemaConfig.put("name", sanitizeSchemaName(schemaName));
+            schemaConfig.put("strict", false);
+            schemaConfig.put("schema", jsonSchema);
+            Map<String, Object> responseFormat = new HashMap<>();
+            responseFormat.put("type", "json_schema");
+            responseFormat.put("json_schema", schemaConfig);
+            return responseFormat;
+        }
+        Map<String, Object> responseFormat = new HashMap<>();
+        responseFormat.put("type", "json_object");
+        return responseFormat;
+    }
+
+    private String appendJsonSchemaInstruction(String userPrompt, String schemaName, Map<String, Object> jsonSchema) {
+        if (jsonSchema == null || jsonSchema.isEmpty()) {
+            return userPrompt;
+        }
+        return userPrompt
+                + "\n\nReturn JSON only. It must conform to JSON schema `"
+                + sanitizeSchemaName(schemaName)
+                + "`:\n"
+                + serializeSchema(jsonSchema);
+    }
+
+    private String serializeSchema(Map<String, Object> jsonSchema) {
+        try {
+            return OBJECT_MAPPER.writeValueAsString(jsonSchema);
+        } catch (JsonProcessingException exception) {
+            return String.valueOf(jsonSchema);
+        }
+    }
+
+    private String sanitizeSchemaName(String schemaName) {
+        if (schemaName == null || schemaName.isBlank()) {
+            return "script_schema";
+        }
+        return schemaName.replaceAll("[^A-Za-z0-9_-]", "_");
     }
 
     private String getEndpoint() {
@@ -200,12 +266,26 @@ public class OpenAiCompatibleClient implements AiClient {
         return provider.trim().toLowerCase(Locale.ROOT);
     }
 
+    private SimpleClientHttpRequestFactory requestFactory(AiModelProperties properties) {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(toMillis(properties.getConnectTimeoutSeconds(), 10));
+        factory.setReadTimeout(toMillis(properties.getReadTimeoutSeconds(), 90));
+        return factory;
+    }
+
+    private int toMillis(int seconds, int fallbackSeconds) {
+        int normalized = seconds > 0 ? seconds : fallbackSeconds;
+        return Math.multiplyExact(normalized, 1000);
+    }
+
     public static class ChatRequest {
         public String model;
         public List<Message> messages;
         public Double temperature;
         @JsonProperty("max_tokens")
         public Integer maxTokens;
+        @JsonProperty("response_format")
+        public Map<String, Object> responseFormat;
     }
 
     public static class Message {

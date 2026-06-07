@@ -8,12 +8,18 @@ import type {
   ValidationResult
 } from './types'
 
+const GENERATION_TIMEOUT_MS = 120000
+
 export function generateScript(projectId: ProjectId) {
-  return unwrap<ScriptResponse>(http.post(`/projects/${projectId}/script/generate`))
+  return unwrap<ScriptResponse>(http.post(`/projects/${projectId}/script/generate`, undefined, {
+    timeout: GENERATION_TIMEOUT_MS
+  }))
 }
 
 export function regenerateScript(projectId: ProjectId) {
-  return unwrap<ScriptResponse>(http.post(`/projects/${projectId}/script/regenerate`))
+  return unwrap<ScriptResponse>(http.post(`/projects/${projectId}/script/regenerate`, undefined, {
+    timeout: GENERATION_TIMEOUT_MS
+  }))
 }
 
 export function getScriptStatus(projectId: ProjectId) {

@@ -1,7 +1,10 @@
 package com.scriptforge.novelscript.util;
 
 import com.scriptforge.novelscript.dto.response.ValidationResult;
+import com.scriptforge.novelscript.entity.ProjectWorkspace;
 import org.junit.jupiter.api.Test;
+
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -122,8 +125,123 @@ class YamlScriptValidatorTests {
         ));
 
         assertThat(repaired)
-                .contains("summary: '在一个雨夜")
+                .contains("summary: 在一个雨夜")
                 .contains("\"旧剧院\"和\"午夜\"");
+        assertThat(validator.validate(repaired).valid()).isTrue();
+    }
+
+    @Test
+    void repairConvertsLlmProseWithBareInnerQuotesToValidYaml() {
+        String repaired = validator.repair(validYaml().replace(
+                "summary: 林秋收到匿名信并前往旧剧院。",
+                "summary: \"天梦冰蚕向霍雨浩展示了\"智慧魂环\"的独特封印，并赋予他能够无限进化的第一魂环和第二武魂。\""
+        ));
+
+        assertThat(repaired)
+                .contains("天梦冰蚕向霍雨浩展示了")
+                .contains("\"智慧魂环\"");
+        assertThat(validator.validate(repaired).valid()).isTrue();
+    }
+
+    @Test
+    void repairConvertsUnbalancedDoubleQuotedScalarsToSingleQuotedScalars() {
+        String repaired = validator.repair(validYaml().replace(
+                "summary: 林秋收到匿名信并前往旧剧院。",
+                "summary: \"天梦冰蚕向霍雨浩展示了\"智慧魂环\"的独特封印，并赋予他能够无限进化的第一魂环和第二武魂。"
+        ));
+
+        assertThat(repaired)
+                .contains("天梦冰蚕向霍雨浩展示了")
+                .contains("\"智慧魂环\"");
+        assertThat(validator.validate(repaired).valid()).isTrue();
+    }
+
+    @Test
+    void repairKeepsSafeDoubleQuotedScalarsWithTrailingComments() {
+        String repaired = validator.repair(validYaml().replace(
+                "summary: 林秋收到匿名信并前往旧剧院。",
+                "summary: \"林秋收到匿名信并前往旧剧院。\" # 模型多余注释"
+        ));
+
+        assertThat(repaired)
+                .contains("summary: 林秋收到匿名信并前往旧剧院。")
+                .doesNotContain("模型多余注释");
+        assertThat(validator.validate(repaired).valid()).isTrue();
+    }
+
+    @Test
+    void repairNormalizesCommonLlmShapeDrift() {
+        String yaml = validYaml()
+                .replace("target_episodes: 3", "target_episodes: \"3\"")
+                .replace("episode_id: 1", "episode_id: \"第1集\"")
+                .replace("""
+                        characters:
+                          - char_001
+                """, """
+                        characters: char_001
+                """)
+                .replace("""
+                        dialogues:
+                          - character: char_001
+                            line: 我必须弄清楚这封信是谁寄来的。
+                """, """
+                        dialogues:
+                          character: char_001
+                          line: 我必须弄清楚这封信是谁寄来的。
+                """);
+
+        String repaired = validator.repair(yaml);
+
+        assertThat(repaired)
+                .contains("target_episodes: 3")
+                .contains("episode_id: 1")
+                .contains("characters:")
+                .contains("- char_001")
+                .contains("dialogues:")
+                .contains("- character: char_001");
+        assertThat(validator.validate(repaired).valid()).isTrue();
+    }
+
+    @Test
+    void repairUnwrapsCommonTopLevelContainer() {
+        String repaired = validator.repair("script:\n" + indent(validYaml()));
+
+        assertThat(repaired).startsWith("project:");
+        assertThat(repaired).doesNotContain("script:");
+        assertThat(validator.validate(repaired).valid()).isTrue();
+    }
+
+    @Test
+    void repairWrapsTopLevelEpisodeArrayWithContextDefaults() {
+        ProjectWorkspace project = new ProjectWorkspace();
+        project.setTitle("雨夜来信");
+        project.getSetting().setScriptType("short_drama");
+        project.getSetting().setTargetEpisodes(1);
+
+        String repaired = validator.repair("""
+                - episode_id: "第1集"
+                  title: 只返回剧集
+                  summary: 模型漏掉顶层对象，只返回了剧集数组。
+                  scenes:
+                    - scene_id: 1-1
+                      title: 异常输出
+                      location: 旧剧院
+                      time: 午夜
+                      characters: char_001
+                      action: 林秋和周然发现输出结构需要被兼容处理。
+                      dialogues:
+                        character: char_001
+                        line: 这次模型只返回了数组。
+                """, project);
+
+        assertThat(repaired)
+                .startsWith("project:")
+                .contains("title: 雨夜来信")
+                .contains("script_type: short_drama")
+                .contains("episode_id: 1")
+                .contains("characters:")
+                .contains("- id: char_001")
+                .contains("episodes:");
         assertThat(validator.validate(repaired).valid()).isTrue();
     }
 
@@ -177,5 +295,11 @@ class YamlScriptValidatorTests {
                           - character: char_001
                             line: 我必须弄清楚这封信是谁寄来的。
                 """;
+    }
+
+    private String indent(String yaml) {
+        return yaml.lines()
+                .map(line -> "  " + line)
+                .collect(Collectors.joining("\n"));
     }
 }

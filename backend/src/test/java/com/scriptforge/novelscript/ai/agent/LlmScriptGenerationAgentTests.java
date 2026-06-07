@@ -7,7 +7,9 @@ import com.scriptforge.novelscript.entity.ProjectWorkspace;
 import com.scriptforge.novelscript.util.YamlScriptValidator;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -24,8 +26,50 @@ class LlmScriptGenerationAgentTests {
 
         assertThat(validator.validate(yaml).valid()).isTrue();
         assertThat(yaml).contains("title: LLM 版剧本");
-        assertThat(client.systemPrompt).contains("Return only valid YAML");
+        assertThat(client.systemPrompt).contains("Return only valid JSON");
         assertThat(client.userPrompt).contains("Novel title: 雨夜来信");
+        assertThat(client.schemaNames).contains("script_outline");
+    }
+
+    @Test
+    void generateBuildsScriptFromOutlineAndEpisodeJsonCalls() {
+        RecordingAiClient client = new RecordingAiClient(
+                outlineJson(),
+                episodeJson(1, "雨夜来信", "林秋收到匿名信并决定出门。"),
+                episodeJson(2, "旧剧院", "林秋在旧剧院发现旧照片。"),
+                episodeJson(3, "回声", "林秋用回声线索锁定真相。")
+        );
+        LlmScriptGenerationAgent agent = createAgent(client);
+
+        String yaml = agent.generate(sampleProject());
+
+        assertThat(validator.validate(yaml).valid()).isTrue();
+        assertThat(yaml)
+                .contains("title: JSON 分段剧本")
+                .contains("title: 第1集：雨夜来信")
+                .contains("title: 第2集：旧剧院")
+                .contains("title: 第3集：回声")
+                .doesNotContain("name: 主角");
+        assertThat(client.schemaNames)
+                .containsExactly("script_outline", "script_episode", "script_episode", "script_episode");
+    }
+
+    @Test
+    void generateRetriesWithLlmRepairBeforeRuleBasedFallback() {
+        RecordingAiClient client = new RecordingAiClient(
+                scriptJson("缺角色的 JSON 剧本", false),
+                scriptJson("LLM 修复后的 JSON 剧本", true)
+        );
+        LlmScriptGenerationAgent agent = createAgent(client);
+
+        String yaml = agent.generate(sampleProject());
+
+        assertThat(validator.validate(yaml).valid()).isTrue();
+        assertThat(yaml)
+                .contains("title: LLM 修复后的 JSON 剧本")
+                .doesNotContain("title: 雨夜来信\n");
+        assertThat(client.schemaNames).containsExactly("script_outline", "script_result");
+        assertThat(client.userPrompts.get(1)).contains("Validation errors");
     }
 
     @Test
@@ -59,6 +103,99 @@ class LlmScriptGenerationAgentTests {
         assertThat(yaml)
                 .contains("title: Gemini 版剧本")
                 .contains("\"旧剧院\"和\"午夜\"")
+                .doesNotContain("name: 主角");
+    }
+
+    @Test
+    void generateNormalizesDialogueObjectFromMockClientBeforeFallback() {
+        RecordingAiClient client = new RecordingAiClient(validYaml("Gemini 对白兼容测试").replace("""
+                        dialogues:
+                          - character: char_001
+                            line: 我必须弄清楚这封信是谁寄来的。
+                """, """
+                        dialogues:
+                          character: char_001
+                          line: 我必须弄清楚这封信是谁寄来的。
+                """));
+        LlmScriptGenerationAgent agent = createAgent(client);
+
+        String yaml = agent.generate(sampleProject());
+
+        assertThat(validator.validate(yaml).valid()).isTrue();
+        assertThat(yaml)
+                .contains("title: Gemini 对白兼容测试")
+                .contains("dialogues:")
+                .contains("- character: char_001")
+                .doesNotContain("name: 主角");
+    }
+
+    @Test
+    void generateWrapsTopLevelEpisodeArrayFromMockClientBeforeFallback() {
+        RecordingAiClient client = new RecordingAiClient("""
+                - episode_id: "第1集"
+                  title: Gemini 顶层数组兼容测试
+                  summary: 模型漏掉 project 和 characters，只返回 episodes 数组。
+                  scenes:
+                    - scene_id: 1-1
+                      title: 顶层数组
+                      location: 旧剧院
+                      time: 午夜
+                      characters: char_001
+                      action: 林秋发现模型输出不是标准根对象。
+                      dialogues:
+                        character: char_001
+                        line: 这次返回的是数组，但仍然应该被兼容。
+                """);
+        LlmScriptGenerationAgent agent = createAgent(client);
+
+        String yaml = agent.generate(sampleProject());
+
+        assertThat(validator.validate(yaml).valid()).isTrue();
+        assertThat(yaml)
+                .contains("title: 雨夜来信")
+                .contains("title: Gemini 顶层数组兼容测试")
+                .contains("- id: char_001")
+                .doesNotContain("name: 主角");
+    }
+
+    @Test
+    void generateUnwrapsScriptContainerFromMockClientBeforeFallback() {
+        RecordingAiClient client = new RecordingAiClient("""
+                script:
+                  project:
+                    title: Gemini 外层容器兼容测试
+                    source_type: novel
+                    script_type: short_drama
+                    language: zh-CN
+                    target_episodes: 1
+                  characters:
+                    - id: char_001
+                      name: 林秋
+                      role: 主角
+                  episodes:
+                    - episode_id: 1
+                      title: 第一集
+                      summary: 模型把标准 YAML 包在 script 字段下。
+                      scenes:
+                        - scene_id: 1-1
+                          title: 外层容器
+                          location: 旧剧院
+                          time: 午夜
+                          characters:
+                            - char_001
+                          action: 林秋拆开外层容器。
+                          dialogues:
+                            - character: char_001
+                              line: 这次多了一层 script。
+                """);
+        LlmScriptGenerationAgent agent = createAgent(client);
+
+        String yaml = agent.generate(sampleProject());
+
+        assertThat(validator.validate(yaml).valid()).isTrue();
+        assertThat(yaml)
+                .contains("title: Gemini 外层容器兼容测试")
+                .doesNotContain("script:")
                 .doesNotContain("name: 主角");
     }
 
@@ -141,20 +278,154 @@ class LlmScriptGenerationAgentTests {
                 """.formatted(title);
     }
 
+    private String outlineJson() {
+        return """
+                {
+                  "project": {
+                    "title": "JSON 分段剧本",
+                    "source_type": "novel",
+                    "script_type": "short_drama",
+                    "language": "zh-CN",
+                    "target_episodes": 3,
+                    "summary": "林秋循着匿名信追查旧剧院真相。"
+                  },
+                  "characters": [
+                    {
+                      "id": "char_001",
+                      "name": "林秋",
+                      "role": "主角",
+                      "motivation": "找到匿名信背后的真相"
+                    },
+                    {
+                      "id": "char_002",
+                      "name": "周然",
+                      "role": "配角",
+                      "motivation": "保护林秋"
+                    }
+                  ],
+                  "episode_outlines": [
+                    {
+                      "episode_id": 1,
+                      "title": "雨夜来信",
+                      "summary": "林秋收到匿名信。",
+                      "chapter_numbers": [1],
+                      "key_events": ["匿名信出现"]
+                    },
+                    {
+                      "episode_id": 2,
+                      "title": "旧剧院",
+                      "summary": "林秋前往旧剧院。",
+                      "chapter_numbers": [2],
+                      "key_events": ["发现旧照片"]
+                    },
+                    {
+                      "episode_id": 3,
+                      "title": "回声",
+                      "summary": "线索揭开真相。",
+                      "chapter_numbers": [3],
+                      "key_events": ["回声暴露布局"]
+                    }
+                  ]
+                }
+                """;
+    }
+
+    private String episodeJson(int episodeId, String title, String summary) {
+        return """
+                {
+                  "episode": {
+                    "episode_id": %d,
+                    "title": "第%d集：%s",
+                    "summary": "%s",
+                    "scenes": [
+                      {
+                        "scene_id": "%d-1",
+                        "title": "%s",
+                        "location": "旧剧院",
+                        "time": "夜晚",
+                        "characters": ["char_001"],
+                        "action": "林秋追查线索并推进真相。",
+                        "dialogues": [
+                          {
+                            "character": "char_001",
+                            "line": "我必须弄清楚这封信是谁寄来的。"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+                """.formatted(episodeId, episodeId, title, summary, episodeId, title);
+    }
+
+    private String scriptJson(String title, boolean includeCharacters) {
+        String characters = includeCharacters
+                ? """
+                    [
+                      {
+                        "id": "char_001",
+                        "name": "林秋",
+                        "role": "主角",
+                        "motivation": "找到匿名信真相"
+                      }
+                    ]
+                """
+                : "[]";
+        return """
+                {
+                  "project": {
+                    "title": "%s",
+                    "source_type": "novel",
+                    "script_type": "short_drama",
+                    "language": "zh-CN",
+                    "target_episodes": 3,
+                    "summary": "模型生成的 JSON 剧本初稿"
+                  },
+                  "characters": %s,
+                  "episodes": [
+                    {
+                      "episode_id": 1,
+                      "title": "第一集：雨夜来信",
+                      "summary": "林秋收到匿名信并前往旧剧院。",
+                      "scenes": [
+                        {
+                          "scene_id": "1-1",
+                          "title": "匿名信",
+                          "location": "林秋家",
+                          "time": "夜晚",
+                          "characters": ["char_001"],
+                          "action": "林秋读完匿名信，决定前往旧剧院。",
+                          "dialogues": [
+                            {
+                              "character": "char_001",
+                              "line": "我必须弄清楚这封信是谁寄来的。"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """.formatted(title, characters);
+    }
+
     private static class RecordingAiClient implements AiClient {
 
-        private final String response;
+        private final List<String> responses;
         private final RuntimeException exception;
+        private int responseIndex;
         private String systemPrompt;
         private String userPrompt;
+        private final List<String> userPrompts = new ArrayList<>();
+        private final List<String> schemaNames = new ArrayList<>();
 
-        RecordingAiClient(String response) {
-            this.response = response;
+        RecordingAiClient(String... responses) {
+            this.responses = List.of(responses);
             this.exception = null;
         }
 
         RecordingAiClient(RuntimeException exception) {
-            this.response = null;
+            this.responses = List.of();
             this.exception = exception;
         }
 
@@ -167,10 +438,25 @@ class LlmScriptGenerationAgentTests {
         public String chatWithSystem(String systemPrompt, String userPrompt) {
             this.systemPrompt = systemPrompt;
             this.userPrompt = userPrompt;
+            this.userPrompts.add(userPrompt);
             if (exception != null) {
                 throw exception;
             }
+            if (responses.isEmpty()) {
+                return "";
+            }
+            String response = responses.get(Math.min(responseIndex, responses.size() - 1));
+            responseIndex++;
             return response;
+        }
+
+        @Override
+        public String chatJsonWithSystem(String systemPrompt,
+                                         String userPrompt,
+                                         String schemaName,
+                                         Map<String, Object> jsonSchema) {
+            this.schemaNames.add(schemaName);
+            return chatWithSystem(systemPrompt, userPrompt);
         }
     }
 }

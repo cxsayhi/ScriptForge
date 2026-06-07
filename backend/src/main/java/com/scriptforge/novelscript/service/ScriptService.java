@@ -115,8 +115,9 @@ public class ScriptService {
 
     @Transactional
     public RepairResponse repair(Long projectId, String yaml) {
-        String source = yaml == null || yaml.isBlank() ? projectService.get(projectId).getScriptResult().getYaml() : yaml;
-        String repaired = validator.repair(source);
+        ProjectWorkspace project = projectService.get(projectId);
+        String source = yaml == null || yaml.isBlank() ? project.getScriptResult().getYaml() : yaml;
+        String repaired = validator.repair(source, project);
         ValidationResult validation = validator.validate(repaired);
         if (validation.valid()) {
             saveScriptResult(projectId, repaired, validation);
