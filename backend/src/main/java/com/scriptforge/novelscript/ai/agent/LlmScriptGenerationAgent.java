@@ -1,8 +1,13 @@
 package com.scriptforge.novelscript.ai.agent;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scriptforge.novelscript.ai.client.AiClient;
 import com.scriptforge.novelscript.ai.prompt.PromptBuilder;
 import com.scriptforge.novelscript.dto.response.ValidationResult;
+import com.scriptforge.novelscript.entity.AdaptationSetting;
+import com.scriptforge.novelscript.entity.Chapter;
 import com.scriptforge.novelscript.entity.ProjectWorkspace;
 import com.scriptforge.novelscript.util.YamlScriptValidator;
 import org.slf4j.Logger;
@@ -10,6 +15,14 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Component;
+import org.yaml.snakeyaml.DumperOptions;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.error.YAMLException;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 @Primary
 @Component
@@ -17,14 +30,25 @@ import org.springframework.stereotype.Component;
 public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
 
     private static final Logger log = LoggerFactory.getLogger(LlmScriptGenerationAgent.class);
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final int CHAPTER_DIGEST_LIMIT = 900;
+    private static final int EPISODE_CHAPTER_LIMIT = 2400;
 
-    private static final String SYSTEM_PROMPT = """
+    private static final String JSON_SYSTEM_PROMPT = """
             You are ScriptForge's script adaptation engine.
-            Return only valid YAML that matches the requested schema.
-            Do not include Markdown fences, explanations, or comments outside YAML.
+            Return only valid JSON that matches the requested JSON schema.
+            Do not include Markdown fences, explanations, comments, or text outside JSON.
+            """;
+
+    private static final String REPAIR_SYSTEM_PROMPT = """
+            You are ScriptForge's strict JSON repair engine.
+            Return only valid JSON that matches the requested JSON schema.
+            Preserve the script content as much as possible, but fix syntax, types, missing wrappers, and schema shape.
+            Do not include Markdown fences, explanations, comments, or text outside JSON.
             """;
 
     private final AiClient aiClient;
+    @SuppressWarnings("unused")
     private final PromptBuilder promptBuilder;
     private final YamlScriptValidator validator;
     private final RuleBasedScriptGenerationAgent fallbackAgent;
@@ -42,14 +66,32 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
     @Override
     public String generate(ProjectWorkspace project) {
         try {
-            String prompt = promptBuilder.buildScriptGenerationPrompt(project);
-            String rawResponse = aiClient.chatWithSystem(SYSTEM_PROMPT, prompt);
-            String yaml = extractYaml(rawResponse);
-            ValidationResult validation = validator.validate(yaml);
+            Draft draft = generateSegmentedJsonDraft(project);
+            ValidationResult validation = validator.validate(draft.yaml());
             if (validation.valid()) {
-                return yaml;
+                return draft.yaml();
             }
-            log.warn("LLM script result failed validation, falling back to rule-based agent: {}", validation.errors());
+
+            Draft repaired = repairWithLlm(project, draft.yaml(), validation.errors());
+            if (repaired != null) {
+                ValidationResult repairedValidation = validator.validate(repaired.yaml());
+                if (repairedValidation.valid()) {
+                    return repaired.yaml();
+                }
+                log.warn(
+                        "LLM script repair failed validation, falling back to rule-based agent: {}. raw={}, repaired={}",
+                        repairedValidation.errors(),
+                        preview(repaired.raw()),
+                        preview(repaired.yaml())
+                );
+            } else {
+                log.warn(
+                        "LLM script result failed validation and repair failed, falling back to rule-based agent: {}. raw={}, repaired={}",
+                        validation.errors(),
+                        preview(draft.raw()),
+                        preview(draft.yaml())
+                );
+            }
         } catch (RuntimeException exception) {
             log.warn("LLM script generation failed, falling back to rule-based agent: {}", exception.getMessage());
             log.debug("LLM script generation failure details", exception);
@@ -57,17 +99,199 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
         return fallbackAgent.generate(project);
     }
 
-    private String extractYaml(String response) {
+    private Draft generateSegmentedJsonDraft(ProjectWorkspace project) {
+        String outlineRaw = aiClient.chatJsonWithSystem(
+                JSON_SYSTEM_PROMPT,
+                buildOutlinePrompt(project),
+                "script_outline",
+                outlineSchema()
+        );
+        Map<String, Object> outline = parseStructuredMap(outlineRaw, project);
+        if (containsCompleteScript(outline)) {
+            return new Draft(toYaml(outline, project), outlineRaw);
+        }
+
+        int targetEpisodes = targetEpisodeCount(project, outline);
+        Map<String, Object> root = new LinkedHashMap<>();
+        root.put("project", outline.getOrDefault("project", defaultProject(project, targetEpisodes)));
+        root.put("characters", outline.getOrDefault("characters", List.of(defaultCharacter())));
+
+        List<Object> episodeOutlines = listValue(firstPresent(outline, "episode_outlines", "episodeOutlines", "episodes"));
+        List<Object> episodes = new ArrayList<>();
+        StringBuilder raw = new StringBuilder(outlineRaw);
+        for (int episodeIndex = 1; episodeIndex <= targetEpisodes; episodeIndex++) {
+            Object episodeOutline = episodeIndex <= episodeOutlines.size() ? episodeOutlines.get(episodeIndex - 1) : Map.of();
+            String episodeRaw = aiClient.chatJsonWithSystem(
+                    JSON_SYSTEM_PROMPT,
+                    buildEpisodePrompt(project, root, episodeOutline, episodeIndex, targetEpisodes),
+                    "script_episode",
+                    episodeEnvelopeSchema()
+            );
+            raw.append("\n\n--- episode ").append(episodeIndex).append(" raw ---\n").append(episodeRaw);
+            episodes.add(extractEpisode(parseStructuredValue(episodeRaw, project), episodeIndex));
+        }
+        root.put("episodes", episodes);
+        return new Draft(toYaml(root, project), raw.toString());
+    }
+
+    private Draft repairWithLlm(ProjectWorkspace project, String invalidYaml, List<String> errors) {
+        try {
+            String repairRaw = aiClient.chatJsonWithSystem(
+                    REPAIR_SYSTEM_PROMPT,
+                    buildRepairPrompt(project, invalidYaml, errors),
+                    "script_result",
+                    scriptSchema()
+            );
+            Map<String, Object> repaired = parseStructuredMap(repairRaw, project);
+            return new Draft(toYaml(repaired, project), repairRaw);
+        } catch (RuntimeException exception) {
+            log.warn("LLM script repair retry failed: {}", exception.getMessage());
+            log.debug("LLM script repair retry failure details", exception);
+            return null;
+        }
+    }
+
+    private String buildOutlinePrompt(ProjectWorkspace project) {
+        return """
+                Generate the first planning pass for a novel-to-script adaptation.
+
+                Return JSON with exactly these root fields:
+                - project: object matching the final script project schema.
+                - characters: compact stable character list with ids like char_001.
+                - episode_outlines: exactly %d outline objects with episode_id, title, summary, chapter_numbers, and key_events.
+
+                Do not generate final scenes in this pass.
+
+                Project settings:
+                %s
+
+                Chapter digest:
+                %s
+                """.formatted(
+                targetEpisodeCount(project, null),
+                settingsBlock(project),
+                formatChapters(project.getNovelContent().getChapters(), CHAPTER_DIGEST_LIMIT)
+        );
+    }
+
+    private String buildEpisodePrompt(ProjectWorkspace project,
+                                      Map<String, Object> root,
+                                      Object episodeOutline,
+                                      int episodeIndex,
+                                      int targetEpisodes) {
+        return """
+                Generate one episode script as JSON.
+
+                Return JSON with exactly one root field `episode`.
+                The episode must include episode_id, title, summary, and at least one shootable scene.
+                Every scene must include scene_id, title, location, time, characters, action, and dialogues.
+                Use only character ids from the supplied character list when possible.
+
+                Episode number: %d of %d
+                Project settings:
+                %s
+
+                Project object:
+                %s
+
+                Character list:
+                %s
+
+                Episode outline:
+                %s
+
+                Relevant source chapters:
+                %s
+                """.formatted(
+                episodeIndex,
+                targetEpisodes,
+                settingsBlock(project),
+                toJson(root.get("project")),
+                toJson(root.get("characters")),
+                toJson(episodeOutline),
+                formatChapters(chaptersForEpisode(project, episodeIndex, targetEpisodes), EPISODE_CHAPTER_LIMIT)
+        );
+    }
+
+    private String buildRepairPrompt(ProjectWorkspace project, String invalidYaml, List<String> errors) {
+        return """
+                The previous script draft failed validation. Repair it into one complete JSON script object.
+
+                Validation errors:
+                %s
+
+                Project settings:
+                %s
+
+                Invalid draft:
+                %s
+                """.formatted(
+                String.join("\n", errors),
+                settingsBlock(project),
+                invalidYaml
+        );
+    }
+
+    private Map<String, Object> parseStructuredMap(String response, ProjectWorkspace project) {
+        Object parsed = parseStructuredValue(response, project);
+        if (parsed instanceof Map<?, ?> map) {
+            return mutableMap(map);
+        }
+        throw new IllegalStateException("LLM response root is not an object");
+    }
+
+    private Object parseStructuredValue(String response, ProjectWorkspace project) {
         if (response == null || response.isBlank()) {
             throw new IllegalStateException("LLM response is empty");
         }
 
+        Object parsedJson = parseJson(response);
+        if (parsedJson != null) {
+            return parsedJson;
+        }
+
+        String repairedYaml = validator.repair(response, project);
+        try {
+            return new Yaml().load(repairedYaml);
+        } catch (YAMLException exception) {
+            throw new IllegalStateException("LLM response is not valid JSON or repairable YAML", exception);
+        }
+    }
+
+    private Object parseJson(String response) {
+        for (String candidate : jsonCandidates(response)) {
+            try {
+                return OBJECT_MAPPER.readValue(candidate, new TypeReference<>() {
+                });
+            } catch (JsonProcessingException ignored) {
+                // Try the next candidate; LLMs often wrap JSON in fences or stray text.
+            }
+        }
+        return null;
+    }
+
+    private List<String> jsonCandidates(String response) {
         String trimmed = response.trim();
+        List<String> candidates = new ArrayList<>();
+        candidates.add(trimmed);
+
         String fenced = extractFencedBlock(trimmed);
         if (fenced != null) {
-            return validator.repair(fenced);
+            candidates.add(fenced);
         }
-        return validator.repair(trimmed);
+
+        int objectStart = trimmed.indexOf('{');
+        int objectEnd = trimmed.lastIndexOf('}');
+        if (objectStart >= 0 && objectEnd > objectStart) {
+            candidates.add(trimmed.substring(objectStart, objectEnd + 1));
+        }
+
+        int arrayStart = trimmed.indexOf('[');
+        int arrayEnd = trimmed.lastIndexOf(']');
+        if (arrayStart >= 0 && arrayEnd > arrayStart) {
+            candidates.add(trimmed.substring(arrayStart, arrayEnd + 1));
+        }
+        return candidates;
     }
 
     private String extractFencedBlock(String response) {
@@ -87,5 +311,360 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
         }
 
         return response.substring(contentStart + 1, closing).trim();
+    }
+
+    private String toYaml(Object value, ProjectWorkspace project) {
+        DumperOptions options = new DumperOptions();
+        options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
+        options.setPrettyFlow(true);
+        options.setIndent(2);
+        options.setIndicatorIndent(0);
+        options.setWidth(120);
+        return validator.repair(new Yaml(options).dump(value), project);
+    }
+
+    private Object extractEpisode(Object parsed, int episodeIndex) {
+        if (parsed instanceof Map<?, ?> map) {
+            Object episode = firstPresent(map, "episode");
+            if (episode != null) {
+                return episode;
+            }
+            Object episodesValue = firstPresent(map, "episodes");
+            Object selected = selectEpisode(listValue(episodesValue), episodeIndex);
+            if (selected != null) {
+                return selected;
+            }
+            if (looksLikeEpisode(map)) {
+                return map;
+            }
+        }
+        if (parsed instanceof List<?> list) {
+            Object selected = selectEpisode(list, episodeIndex);
+            if (selected != null) {
+                return selected;
+            }
+        }
+        throw new IllegalStateException("LLM episode response does not contain episode " + episodeIndex);
+    }
+
+    private Object selectEpisode(List<?> episodes, int episodeIndex) {
+        for (Object episode : episodes) {
+            if (episode instanceof Map<?, ?> map && integer(map.get("episode_id")) == episodeIndex) {
+                return episode;
+            }
+        }
+        return episodes.isEmpty() ? null : episodes.get(0);
+    }
+
+    private boolean containsCompleteScript(Map<String, Object> root) {
+        Object episodesValue = root.get("episodes");
+        if (!(episodesValue instanceof List<?> episodes) || episodes.isEmpty()) {
+            return false;
+        }
+        for (Object episode : episodes) {
+            if (!(episode instanceof Map<?, ?> map) || !looksLikeEpisode(map) || !map.containsKey("scenes")) {
+                return false;
+            }
+        }
+        return root.containsKey("project") && root.containsKey("characters");
+    }
+
+    private boolean looksLikeEpisode(Map<?, ?> map) {
+        return map.containsKey("episode_id")
+                || map.containsKey("episodeId")
+                || (map.containsKey("title") && map.containsKey("summary") && map.containsKey("scenes"));
+    }
+
+    private int targetEpisodeCount(ProjectWorkspace project, Map<String, Object> outline) {
+        int targetEpisodes = project.getSetting().getTargetEpisodes();
+        if (targetEpisodes > 0) {
+            return targetEpisodes;
+        }
+        if (outline != null) {
+            List<Object> outlines = listValue(firstPresent(outline, "episode_outlines", "episodeOutlines", "episodes"));
+            if (!outlines.isEmpty()) {
+                return outlines.size();
+            }
+        }
+        return 1;
+    }
+
+    private List<Chapter> chaptersForEpisode(ProjectWorkspace project, int episodeIndex, int targetEpisodes) {
+        List<Chapter> chapters = project.getNovelContent().getChapters();
+        if (chapters.isEmpty()) {
+            return List.of();
+        }
+
+        int safeTarget = Math.max(1, targetEpisodes);
+        int start = (episodeIndex - 1) * chapters.size() / safeTarget;
+        int end = episodeIndex * chapters.size() / safeTarget;
+        if (end <= start) {
+            start = Math.min(Math.max(episodeIndex - 1, 0), chapters.size() - 1);
+            end = Math.min(start + 1, chapters.size());
+        }
+        return chapters.subList(start, end);
+    }
+
+    private String formatChapters(List<Chapter> chapters, int maxCharsPerChapter) {
+        StringBuilder builder = new StringBuilder();
+        for (Chapter chapter : chapters) {
+            builder.append("--- Chapter ")
+                    .append(chapter.index())
+                    .append(": ")
+                    .append(chapter.title())
+                    .append(" ---\n")
+                    .append(excerpt(chapter.content(), maxCharsPerChapter))
+                    .append("\n\n");
+        }
+        return builder.toString();
+    }
+
+    private String settingsBlock(ProjectWorkspace project) {
+        AdaptationSetting setting = project.getSetting();
+        return """
+                Novel title: %s
+                Script type: %s
+                Target episodes: %d
+                Episode duration minutes: %d
+                Style: %s
+                Language: %s
+                Adaptation intensity: %s
+                Dialogue style: %s
+                Budget preference: %s
+                Keep original dialogues: %s
+                """.formatted(
+                text(project.getTitle(), "未命名项目"),
+                setting.getScriptType(),
+                setting.getTargetEpisodes(),
+                setting.getEpisodeDurationMinutes(),
+                setting.getStyle(),
+                setting.getLanguage(),
+                setting.getAdaptationIntensity(),
+                setting.getDialogueStyle(),
+                setting.getBudgetPreference(),
+                setting.isKeepOriginalDialogues() ? "是" : "否"
+        );
+    }
+
+    private Map<String, Object> defaultProject(ProjectWorkspace project, int targetEpisodes) {
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put("title", text(project.getTitle(), "AI 生成剧本"));
+        block.put("source_type", "novel");
+        block.put("script_type", project.getSetting().getScriptType());
+        block.put("language", project.getSetting().getLanguage());
+        block.put("target_episodes", targetEpisodes);
+        return block;
+    }
+
+    private Map<String, Object> defaultCharacter() {
+        Map<String, Object> character = new LinkedHashMap<>();
+        character.put("id", "char_001");
+        character.put("name", "主角");
+        character.put("role", "主角");
+        return character;
+    }
+
+    private Object firstPresent(Map<?, ?> map, String... keys) {
+        for (String key : keys) {
+            if (map.containsKey(key)) {
+                return map.get(key);
+            }
+        }
+        return null;
+    }
+
+    private List<Object> listValue(Object value) {
+        if (value instanceof List<?> list) {
+            return new ArrayList<>(list);
+        }
+        if (value == null) {
+            return List.of();
+        }
+        return List.of(value);
+    }
+
+    private Map<String, Object> mutableMap(Map<?, ?> source) {
+        Map<String, Object> target = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : source.entrySet()) {
+            if (entry.getKey() != null) {
+                target.put(String.valueOf(entry.getKey()), entry.getValue());
+            }
+        }
+        return target;
+    }
+
+    private int integer(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value == null) {
+            return Integer.MIN_VALUE;
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value).replaceAll("\\D+", ""));
+        } catch (NumberFormatException exception) {
+            return Integer.MIN_VALUE;
+        }
+    }
+
+    private String text(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
+    }
+
+    private String excerpt(String value, int maxLength) {
+        String compact = value == null ? "" : value.replaceAll("\\s+", " ").trim();
+        if (compact.length() <= maxLength) {
+            return compact;
+        }
+        return compact.substring(0, maxLength) + "...";
+    }
+
+    private String toJson(Object value) {
+        try {
+            return OBJECT_MAPPER.writeValueAsString(value);
+        } catch (JsonProcessingException exception) {
+            return String.valueOf(value);
+        }
+    }
+
+    private String preview(String value) {
+        if (value == null) {
+            return "";
+        }
+        String compact = value
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+                .replace("\t", "\\t")
+                .trim();
+        if (compact.length() <= 800) {
+            return compact;
+        }
+        return compact.substring(0, 800) + "...";
+    }
+
+    private Map<String, Object> scriptSchema() {
+        Map<String, Object> properties = new LinkedHashMap<>();
+        properties.put("project", projectSchema());
+        properties.put("characters", arraySchema(characterSchema(), 1));
+        properties.put("episodes", arraySchema(episodeSchema(), 1));
+        return objectSchema(List.of("project", "characters", "episodes"), properties);
+    }
+
+    private Map<String, Object> outlineSchema() {
+        Map<String, Object> outlineProperties = new LinkedHashMap<>();
+        outlineProperties.put("episode_id", integerSchema(1));
+        outlineProperties.put("title", stringSchema());
+        outlineProperties.put("summary", stringSchema());
+        outlineProperties.put("chapter_numbers", arraySchema(integerSchema(1), 0));
+        outlineProperties.put("key_events", arraySchema(stringSchema(), 0));
+
+        Map<String, Object> properties = new LinkedHashMap<>();
+        properties.put("project", projectSchema());
+        properties.put("characters", arraySchema(characterSchema(), 1));
+        properties.put("episode_outlines", arraySchema(objectSchema(
+                List.of("episode_id", "title", "summary"),
+                outlineProperties
+        ), 1));
+        return objectSchema(List.of("project", "characters", "episode_outlines"), properties);
+    }
+
+    private Map<String, Object> episodeEnvelopeSchema() {
+        Map<String, Object> properties = new LinkedHashMap<>();
+        properties.put("episode", episodeSchema());
+        return objectSchema(List.of("episode"), properties);
+    }
+
+    private Map<String, Object> projectSchema() {
+        Map<String, Object> properties = new LinkedHashMap<>();
+        properties.put("title", stringSchema());
+        properties.put("source_type", enumSchema("novel"));
+        properties.put("script_type", enumSchema("web_drama", "short_drama", "movie", "stage_play"));
+        properties.put("language", enumSchema("zh-CN", "en-US"));
+        properties.put("target_episodes", integerSchema(1));
+        properties.put("summary", stringSchema());
+        return objectSchema(List.of("title", "source_type", "script_type", "language", "target_episodes"), properties);
+    }
+
+    private Map<String, Object> characterSchema() {
+        Map<String, Object> relationshipProperties = new LinkedHashMap<>();
+        relationshipProperties.put("target", stringSchema());
+        relationshipProperties.put("relation", stringSchema());
+
+        Map<String, Object> properties = new LinkedHashMap<>();
+        properties.put("id", stringSchema());
+        properties.put("name", stringSchema());
+        properties.put("role", stringSchema());
+        properties.put("description", stringSchema());
+        properties.put("motivation", stringSchema());
+        properties.put("relationships", arraySchema(objectSchema(List.of("target", "relation"), relationshipProperties), 0));
+        return objectSchema(List.of("id", "name", "role"), properties);
+    }
+
+    private Map<String, Object> episodeSchema() {
+        Map<String, Object> properties = new LinkedHashMap<>();
+        properties.put("episode_id", integerSchema(1));
+        properties.put("title", stringSchema());
+        properties.put("summary", stringSchema());
+        properties.put("scenes", arraySchema(sceneSchema(), 1));
+        return objectSchema(List.of("episode_id", "title", "summary", "scenes"), properties);
+    }
+
+    private Map<String, Object> sceneSchema() {
+        Map<String, Object> dialogueProperties = new LinkedHashMap<>();
+        dialogueProperties.put("character", stringSchema());
+        dialogueProperties.put("line", stringSchema());
+
+        Map<String, Object> properties = new LinkedHashMap<>();
+        properties.put("scene_id", stringSchema());
+        properties.put("title", stringSchema());
+        properties.put("location", stringSchema());
+        properties.put("time", stringSchema());
+        properties.put("characters", arraySchema(stringSchema(), 1));
+        properties.put("action", stringSchema());
+        properties.put("dialogues", arraySchema(objectSchema(List.of("character", "line"), dialogueProperties), 1));
+        return objectSchema(
+                List.of("scene_id", "title", "location", "time", "characters", "action", "dialogues"),
+                properties
+        );
+    }
+
+    private Map<String, Object> objectSchema(List<String> required, Map<String, Object> properties) {
+        Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("type", "object");
+        schema.put("required", required);
+        schema.put("properties", properties);
+        return schema;
+    }
+
+    private Map<String, Object> arraySchema(Map<String, Object> itemSchema, int minItems) {
+        Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("type", "array");
+        schema.put("items", itemSchema);
+        if (minItems > 0) {
+            schema.put("minItems", minItems);
+        }
+        return schema;
+    }
+
+    private Map<String, Object> stringSchema() {
+        Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("type", "string");
+        return schema;
+    }
+
+    private Map<String, Object> integerSchema(int minimum) {
+        Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("type", "integer");
+        schema.put("minimum", minimum);
+        return schema;
+    }
+
+    private Map<String, Object> enumSchema(String... values) {
+        Map<String, Object> schema = stringSchema();
+        schema.put("enum", List.of(values));
+        return schema;
+    }
+
+    private record Draft(String yaml, String raw) {
     }
 }

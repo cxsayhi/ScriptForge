@@ -11,6 +11,10 @@ public class AiModelProperties {
 
     private String provider = "openai";
 
+    private int connectTimeoutSeconds = 10;
+
+    private int readTimeoutSeconds = 90;
+
     private OpenAiConfig openai = new OpenAiConfig();
 
     private DeepSeekConfig deepseek = new DeepSeekConfig();
@@ -33,6 +37,22 @@ public class AiModelProperties {
 
     public void setProvider(String provider) {
         this.provider = provider;
+    }
+
+    public int getConnectTimeoutSeconds() {
+        return connectTimeoutSeconds;
+    }
+
+    public void setConnectTimeoutSeconds(int connectTimeoutSeconds) {
+        this.connectTimeoutSeconds = connectTimeoutSeconds;
+    }
+
+    public int getReadTimeoutSeconds() {
+        return readTimeoutSeconds;
+    }
+
+    public void setReadTimeoutSeconds(int readTimeoutSeconds) {
+        this.readTimeoutSeconds = readTimeoutSeconds;
     }
 
     public OpenAiConfig getOpenai() {
@@ -286,4 +306,3 @@ public class AiModelProperties {
         }
     }
 }
-

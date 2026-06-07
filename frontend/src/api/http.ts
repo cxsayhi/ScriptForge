@@ -13,6 +13,10 @@ function resolveHttpErrorMessage(error: AxiosError<Partial<ApiResponse<unknown>>
   const status = error.response?.status
   const serverMessage = error.response?.data?.message
 
+  if (error.code === 'ECONNABORTED') {
+    return '请求超时，AI 生成耗时较长，请稍后查看生成状态或重试'
+  }
+
   if (serverMessage) {
     return serverMessage
   }
