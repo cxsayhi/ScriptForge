@@ -71,20 +71,39 @@ export interface ValidationResult {
   warnings: string[]
 }
 
+export interface FailedEpisode {
+  episodeId: number
+  status: string
+  reason: string
+  rawResponse: string
+}
+
 export interface ScriptResponse {
   projectId: number
   yaml: string
   validationResult: ValidationResult
   updatedAt: string
+  generationStatus: string
+  generationMessage: string
+  rawLlmResponse: string
+  failedEpisodes: FailedEpisode[]
 }
 
 export interface ScriptUpdatePayload {
   yaml: string
 }
 
+export interface FailedEpisodeUpdatePayload {
+  rawResponse: string
+}
+
 export interface RepairResponse {
   yaml: string
   validationResult: ValidationResult
+  generationStatus: string
+  generationMessage: string
+  rawLlmResponse: string
+  failedEpisodes: FailedEpisode[]
 }
 
 export interface ExportFile {

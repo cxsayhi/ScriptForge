@@ -1,12 +1,17 @@
 package com.scriptforge.novelscript.service;
 
 import com.scriptforge.novelscript.common.BusinessException;
+import com.scriptforge.novelscript.ai.agent.RuleBasedScriptGenerationAgent;
+import com.scriptforge.novelscript.ai.agent.ScriptGenerationAgent;
+import com.scriptforge.novelscript.ai.agent.ScriptGenerationResult;
 import com.scriptforge.novelscript.dto.request.AdaptationSettingRequest;
 import com.scriptforge.novelscript.dto.request.ProjectCreateRequest;
 import com.scriptforge.novelscript.dto.response.NovelResponse;
 import com.scriptforge.novelscript.dto.response.ProjectResponse;
+import com.scriptforge.novelscript.dto.response.RepairResponse;
 import com.scriptforge.novelscript.dto.response.ScriptResponse;
 import com.scriptforge.novelscript.entity.AdaptationSetting;
+import com.scriptforge.novelscript.entity.FailedEpisode;
 import com.scriptforge.novelscript.mapper.AdaptationSettingMapper;
 import com.scriptforge.novelscript.mapper.NovelContentMapper;
 import com.scriptforge.novelscript.mapper.ScriptResultMapper;
@@ -14,11 +19,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willReturn;
 
 @SpringBootTest
 @TestPropertySource(properties = {
@@ -57,8 +68,15 @@ class PersistenceServiceTests {
     @Autowired
     private ScriptResultMapper scriptResultMapper;
 
+    @MockBean
+    private ScriptGenerationAgent scriptGenerationAgent;
+
+    private final RuleBasedScriptGenerationAgent ruleBasedAgent = new RuleBasedScriptGenerationAgent();
+
     @BeforeEach
     void setUpDatabase() {
+        given(scriptGenerationAgent.generateResult(any()))
+                .willAnswer(invocation -> ruleBasedAgent.generateResult(invocation.getArgument(0)));
         jdbcTemplate.execute("DROP TABLE IF EXISTS script_result");
         jdbcTemplate.execute("DROP TABLE IF EXISTS adaptation_setting");
         jdbcTemplate.execute("DROP TABLE IF EXISTS novel_content");
@@ -106,6 +124,10 @@ class PersistenceServiceTests {
                     project_id BIGINT NOT NULL,
                     yaml LONGTEXT NOT NULL,
                     validation_status VARCHAR(40) NOT NULL,
+                    raw_llm_response LONGTEXT,
+                    generation_status VARCHAR(40) NOT NULL DEFAULT 'completed',
+                    generation_message VARCHAR(1000),
+                    failed_episodes_json LONGTEXT,
                     updated_at DATETIME NOT NULL,
                     CONSTRAINT fk_script_project FOREIGN KEY (project_id) REFERENCES project(id)
                 )
@@ -203,6 +225,51 @@ class PersistenceServiceTests {
         assertThat(exportService.yaml(project.id())).isEqualTo(generated.yaml());
         assertThat(exportService.markdown(project.id())).contains("# 雨夜来信", "## Episodes");
         assertThat(scriptResultMapper.selectCount(null)).isEqualTo(1);
+    }
+
+    @Test
+    void generatePreservesReviewRequiredLlmResultInsteadOfReplacingItWithRuleBasedScript() {
+        ProjectResponse project = projectService.create(new ProjectCreateRequest("雨夜来信", "LLM 审核联调项目"));
+        novelService.saveText(project.id(), sampleNovelText());
+        willReturn(ScriptGenerationResult.needsReview(
+                "",
+                "--- episode 2 ---\n模型返回了无法解析的剧情文本。",
+                "第 2 集修复失败，原始 LLM 回复已保留",
+                List.of(FailedEpisode.needsReview(2, "第 2 集无法解析", "第 2 集原始回复"))
+        )).given(scriptGenerationAgent).generateResult(any());
+
+        ScriptResponse generated = scriptService.generate(project.id());
+        ProjectResponse fetchedProject = projectService.getResponse(project.id());
+
+        assertThat(generated.generationStatus()).isEqualTo("needs_review");
+        assertThat(generated.generationMessage()).contains("第 2 集修复失败");
+        assertThat(generated.rawLlmResponse()).contains("无法解析的剧情文本");
+        assertThat(generated.failedEpisodes()).singleElement()
+                .satisfies(failedEpisode -> {
+                    assertThat(failedEpisode.episodeId()).isEqualTo(2);
+                    assertThat(failedEpisode.rawResponse()).isEqualTo("第 2 集原始回复");
+                });
+        assertThat(generated.validationResult().valid()).isFalse();
+        assertThat(fetchedProject.status()).isEqualTo("script_review");
+        assertThat(fetchedProject.hasScript()).isTrue();
+        assertThat(scriptService.status(project.id()).getStatus()).isEqualTo("needs_review");
+
+        ScriptResponse updated = scriptService.updateFailedEpisode(project.id(), 2, "用户补充后的第 2 集内容");
+
+        assertThat(updated.generationStatus()).isEqualTo("needs_review");
+        assertThat(updated.failedEpisodes()).singleElement()
+                .satisfies(failedEpisode -> {
+                    assertThat(failedEpisode.status()).isEqualTo("edited");
+                    assertThat(failedEpisode.rawResponse()).isEqualTo("用户补充后的第 2 集内容");
+                });
+
+        String validYaml = ruleBasedAgent.generate(projectService.get(project.id()));
+        RepairResponse repaired = scriptService.repair(project.id(), validYaml);
+
+        assertThat(repaired.validationResult().valid()).isTrue();
+        assertThat(repaired.generationStatus()).isEqualTo("needs_review");
+        assertThat(repaired.failedEpisodes()).hasSize(1);
+        assertThat(projectService.getResponse(project.id()).status()).isEqualTo("script_review");
     }
 
     private String sampleNovelText() {

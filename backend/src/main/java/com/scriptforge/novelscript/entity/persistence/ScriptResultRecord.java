@@ -21,6 +21,18 @@ public class ScriptResultRecord {
     @TableField("validation_status")
     private String validationStatus;
 
+    @TableField("raw_llm_response")
+    private String rawLlmResponse;
+
+    @TableField("generation_status")
+    private String generationStatus;
+
+    @TableField("generation_message")
+    private String generationMessage;
+
+    @TableField("failed_episodes_json")
+    private String failedEpisodesJson;
+
     @TableField("updated_at")
     private LocalDateTime updatedAt;
 
@@ -54,6 +66,38 @@ public class ScriptResultRecord {
 
     public void setValidationStatus(String validationStatus) {
         this.validationStatus = validationStatus;
+    }
+
+    public String getRawLlmResponse() {
+        return rawLlmResponse;
+    }
+
+    public void setRawLlmResponse(String rawLlmResponse) {
+        this.rawLlmResponse = rawLlmResponse;
+    }
+
+    public String getGenerationStatus() {
+        return generationStatus;
+    }
+
+    public void setGenerationStatus(String generationStatus) {
+        this.generationStatus = generationStatus;
+    }
+
+    public String getGenerationMessage() {
+        return generationMessage;
+    }
+
+    public void setGenerationMessage(String generationMessage) {
+        this.generationMessage = generationMessage;
+    }
+
+    public String getFailedEpisodesJson() {
+        return failedEpisodesJson;
+    }
+
+    public void setFailedEpisodesJson(String failedEpisodesJson) {
+        this.failedEpisodesJson = failedEpisodesJson;
     }
 
     public LocalDateTime getUpdatedAt() {

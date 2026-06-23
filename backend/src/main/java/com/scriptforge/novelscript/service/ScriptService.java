@@ -2,19 +2,24 @@ package com.scriptforge.novelscript.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.scriptforge.novelscript.ai.agent.ScriptGenerationAgent;
+import com.scriptforge.novelscript.ai.agent.ScriptGenerationResult;
 import com.scriptforge.novelscript.common.BusinessException;
 import com.scriptforge.novelscript.dto.response.RepairResponse;
 import com.scriptforge.novelscript.dto.response.ScriptResponse;
 import com.scriptforge.novelscript.dto.response.ValidationResult;
+import com.scriptforge.novelscript.entity.FailedEpisode;
 import com.scriptforge.novelscript.entity.GenerationStatus;
 import com.scriptforge.novelscript.entity.ProjectWorkspace;
 import com.scriptforge.novelscript.entity.persistence.ScriptResultRecord;
 import com.scriptforge.novelscript.mapper.ScriptResultMapper;
+import com.scriptforge.novelscript.util.FailedEpisodeJsonConverter;
 import com.scriptforge.novelscript.util.YamlScriptValidator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -25,16 +30,19 @@ public class ScriptService {
     private final ScriptGenerationAgent scriptGenerationAgent;
     private final YamlScriptValidator validator;
     private final ScriptResultMapper scriptResultMapper;
+    private final FailedEpisodeJsonConverter failedEpisodeJsonConverter;
     private final Map<Long, GenerationStatus> generationStatuses = new ConcurrentHashMap<>();
 
     public ScriptService(ProjectService projectService,
                          ScriptGenerationAgent scriptGenerationAgent,
                          YamlScriptValidator validator,
-                         ScriptResultMapper scriptResultMapper) {
+                         ScriptResultMapper scriptResultMapper,
+                         FailedEpisodeJsonConverter failedEpisodeJsonConverter) {
         this.projectService = projectService;
         this.scriptGenerationAgent = scriptGenerationAgent;
         this.validator = validator;
         this.scriptResultMapper = scriptResultMapper;
+        this.failedEpisodeJsonConverter = failedEpisodeJsonConverter;
     }
 
     @Transactional
@@ -48,16 +56,11 @@ public class ScriptService {
         status.setStatus("running");
         status.setMessage("正在生成剧本初稿");
 
-        String yaml;
+        ScriptGenerationResult generationResult;
         ValidationResult validation;
         try {
-            yaml = scriptGenerationAgent.generate(project);
-            validation = validator.validate(yaml);
-            if (!validation.valid()) {
-                status.setStatus("failed");
-                status.setMessage("生成结果未通过 YAML 校验");
-                throw new BusinessException("生成结果未通过 YAML 校验");
-            }
+            generationResult = scriptGenerationAgent.generateResult(project);
+            validation = validator.validate(generationResult.yaml());
         } catch (BusinessException exception) {
             status.setStatus("failed");
             status.setMessage(exception.getMessage());
@@ -68,7 +71,25 @@ public class ScriptService {
             throw exception;
         }
 
-        saveScriptResult(projectId, yaml, validation);
+        boolean needsReview = generationResult.requiresReview() || !validation.valid();
+        if (needsReview) {
+            String message = generationResult.requiresReview()
+                    ? generationResult.message()
+                    : "生成结果未通过 YAML 校验：" + String.join("；", validation.errors());
+            generationResult = ScriptGenerationResult.needsReview(
+                    generationResult.yaml(),
+                    generationResult.rawLlmResponse(),
+                    message,
+                    generationResult.failedEpisodes()
+            );
+            saveScriptResult(projectId, generationResult, validation);
+            projectService.markScriptNeedsReview(projectId);
+            status.setStatus("needs_review");
+            status.setMessage(message);
+            return get(projectId);
+        }
+
+        saveScriptResult(projectId, generationResult, validation);
         projectService.markScriptReady(projectId);
         status.setStatus("completed");
         status.setMessage("剧本初稿已生成");
@@ -82,7 +103,10 @@ public class ScriptService {
         }
         ProjectWorkspace project = projectService.get(projectId);
         GenerationStatus status = new GenerationStatus();
-        if (project.getScriptResult().hasYaml()) {
+        if (project.getScriptResult().requiresReview()) {
+            status.setStatus("needs_review");
+            status.setMessage(project.getScriptResult().getGenerationMessage());
+        } else if (project.getScriptResult().hasYaml()) {
             status.setStatus("completed");
             status.setMessage("剧本初稿已生成");
         }
@@ -101,7 +125,7 @@ public class ScriptService {
         if (!validation.valid()) {
             throw new BusinessException("YAML 校验失败，未保存。请先修复错误。");
         }
-        saveScriptResult(projectId, yaml, validation);
+        saveScriptResult(projectId, ScriptGenerationResult.completed(yaml), validation);
         projectService.markScriptReady(projectId);
         return get(projectId);
     }
@@ -119,11 +143,57 @@ public class ScriptService {
         String source = yaml == null || yaml.isBlank() ? project.getScriptResult().getYaml() : yaml;
         String repaired = validator.repair(source, project);
         ValidationResult validation = validator.validate(repaired);
+        ScriptGenerationResult result = null;
         if (validation.valid()) {
-            saveScriptResult(projectId, repaired, validation);
-            projectService.markScriptReady(projectId);
+            if (project.getScriptResult().getFailedEpisodes().isEmpty()) {
+                result = ScriptGenerationResult.completed(repaired);
+                projectService.markScriptReady(projectId);
+            } else {
+                result = ScriptGenerationResult.needsReview(
+                        repaired,
+                        project.getScriptResult().getRawLlmResponse(),
+                        project.getScriptResult().getGenerationMessage(),
+                        project.getScriptResult().getFailedEpisodes()
+                );
+                projectService.markScriptNeedsReview(projectId);
+            }
+            saveScriptResult(projectId, result, validation);
         }
-        return new RepairResponse(repaired, validation);
+        return new RepairResponse(
+                repaired,
+                validation,
+                result == null ? project.getScriptResult().getGenerationStatus() : result.status(),
+                result == null ? project.getScriptResult().getGenerationMessage() : result.message(),
+                result == null ? project.getScriptResult().getRawLlmResponse() : result.rawLlmResponse(),
+                result == null ? project.getScriptResult().getFailedEpisodes() : result.failedEpisodes()
+        );
+    }
+
+    @Transactional
+    public ScriptResponse updateFailedEpisode(Long projectId, int episodeId, String rawResponse) {
+        ProjectWorkspace project = projectService.get(projectId);
+        List<FailedEpisode> updatedEpisodes = new ArrayList<>();
+        boolean found = false;
+        for (FailedEpisode failedEpisode : project.getScriptResult().getFailedEpisodes()) {
+            if (failedEpisode.episodeId() == episodeId) {
+                updatedEpisodes.add(failedEpisode.withEditedRawResponse(rawResponse));
+                found = true;
+            } else {
+                updatedEpisodes.add(failedEpisode);
+            }
+        }
+        if (!found) {
+            throw new BusinessException("待审核的第 " + episodeId + " 集不存在");
+        }
+
+        ScriptResultRecord record = findScriptResult(projectId);
+        if (record == null) {
+            throw new BusinessException("剧本结果不存在");
+        }
+        record.setFailedEpisodesJson(failedEpisodeJsonConverter.toJson(updatedEpisodes));
+        record.setUpdatedAt(LocalDateTime.now());
+        scriptResultMapper.updateById(record);
+        return get(projectId);
     }
 
     private ScriptResponse toResponse(ProjectWorkspace project) {
@@ -132,24 +202,33 @@ public class ScriptService {
                 project.getId(),
                 yaml,
                 validator.validate(yaml),
-                project.getScriptResult().getUpdatedAt()
+                project.getScriptResult().getUpdatedAt(),
+                project.getScriptResult().getGenerationStatus(),
+                project.getScriptResult().getGenerationMessage(),
+                project.getScriptResult().getRawLlmResponse(),
+                project.getScriptResult().getFailedEpisodes()
         );
     }
 
-    private void saveScriptResult(Long projectId, String yaml, ValidationResult validation) {
+    private void saveScriptResult(Long projectId,
+                                  ScriptGenerationResult generationResult,
+                                  ValidationResult validation) {
         LocalDateTime now = LocalDateTime.now();
         ScriptResultRecord record = findScriptResult(projectId);
         if (record == null) {
             record = new ScriptResultRecord();
             record.setProjectId(projectId);
-            record.setYaml(yaml);
-            record.setValidationStatus(validation.valid() ? "valid" : "invalid");
-            record.setUpdatedAt(now);
+        }
+        record.setYaml(generationResult.yaml());
+        record.setValidationStatus(validation.valid() ? "valid" : "invalid");
+        record.setRawLlmResponse(generationResult.requiresReview() ? generationResult.rawLlmResponse() : null);
+        record.setGenerationStatus(generationResult.status());
+        record.setGenerationMessage(generationResult.message());
+        record.setFailedEpisodesJson(failedEpisodeJsonConverter.toJson(generationResult.failedEpisodes()));
+        record.setUpdatedAt(now);
+        if (record.getId() == null) {
             scriptResultMapper.insert(record);
         } else {
-            record.setYaml(yaml);
-            record.setValidationStatus(validation.valid() ? "valid" : "invalid");
-            record.setUpdatedAt(now);
             scriptResultMapper.updateById(record);
         }
     }

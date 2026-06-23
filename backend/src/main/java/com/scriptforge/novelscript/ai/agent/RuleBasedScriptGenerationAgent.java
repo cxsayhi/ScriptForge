@@ -16,7 +16,7 @@ import java.util.Map;
 public class RuleBasedScriptGenerationAgent implements ScriptGenerationAgent {
 
     @Override
-    public String generate(ProjectWorkspace project) {
+    public ScriptGenerationResult generateResult(ProjectWorkspace project) {
         AdaptationSetting setting = project.getSetting();
         List<Chapter> chapters = project.getNovelContent().getChapters();
         int targetEpisodes = Math.max(1, setting.getTargetEpisodes());
@@ -32,7 +32,7 @@ public class RuleBasedScriptGenerationAgent implements ScriptGenerationAgent {
         options.setIndent(2);
         options.setIndicatorIndent(0);
         options.setWidth(100);
-        return new Yaml(options).dump(root);
+        return ScriptGenerationResult.completed(new Yaml(options).dump(root));
     }
 
     private Map<String, Object> projectBlock(ProjectWorkspace project, AdaptationSetting setting, List<Chapter> chapters) {

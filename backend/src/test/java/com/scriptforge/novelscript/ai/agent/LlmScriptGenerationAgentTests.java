@@ -80,20 +80,30 @@ class LlmScriptGenerationAgentTests {
     }
 
     @Test
-    void generateFallsBackWhenEpisodeIdDoesNotMatchRequestedEpisode() {
+    void generatePreservesPartialDraftWhenEpisodeIdDoesNotMatchRequestedEpisode() {
         RecordingAiClient client = new RecordingAiClient(
                 outlineJson(),
                 episodeJson(1, "雨夜来信", "林秋收到匿名信并决定出门。"),
-                episodeJson(1, "重复集号", "模型错误地再次返回第一集。")
+                episodeJson(1, "重复集号", "模型错误地再次返回第一集。"),
+                episodeJson(1, "重复集号", "修复仍然错误地返回第一集。"),
+                episodeJson(3, "回声", "林秋用回声线索锁定真相。")
         );
         LlmScriptGenerationAgent agent = createAgent(client);
 
-        String yaml = agent.generate(sampleProject());
+        ScriptGenerationResult result = agent.generateResult(sampleProject());
 
-        assertThat(validator.validate(yaml).valid()).isTrue();
-        assertThat(yaml).contains("title: 雨夜来信");
+        assertThat(result.requiresReview()).isTrue();
+        assertThat(result.yaml()).contains("title: JSON 分段剧本", "episode_id: 1", "episode_id: 3");
+        assertThat(result.rawLlmResponse()).contains("--- outline ---", "--- episode 2 ---", "--- episode 3 ---", "重复集号");
+        assertThat(result.failedEpisodes()).singleElement()
+                .satisfies(failedEpisode -> {
+                    assertThat(failedEpisode.episodeId()).isEqualTo(2);
+                    assertThat(failedEpisode.status()).isEqualTo("needs_review");
+                    assertThat(failedEpisode.reason()).contains("第 2 集生成失败");
+                    assertThat(failedEpisode.rawResponse()).contains("重复集号");
+                });
         assertThat(client.schemaNames)
-                .containsExactly("script_outline", "script_episode", "script_episode", "script_episode");
+                .containsExactly("script_outline", "script_episode", "script_episode", "script_episode", "script_episode");
     }
 
     @Test
@@ -133,7 +143,7 @@ class LlmScriptGenerationAgentTests {
     }
 
     @Test
-    void generateRepairsUnparseableOutlineBeforeRuleBasedFallback() {
+    void generateRepairsUnparseableOutlineBeforeMarkingResultForReview() {
         RecordingAiClient client = new RecordingAiClient(
                 "我将先解释生成思路，但这里没有返回可解析结构。",
                 outlineJson(),
@@ -156,7 +166,7 @@ class LlmScriptGenerationAgentTests {
     }
 
     @Test
-    void generateRetriesWithLlmRepairBeforeRuleBasedFallback() {
+    void generateRetriesWithLlmRepairBeforeReturningCompletedResult() {
         RecordingAiClient client = new RecordingAiClient(
                 scriptJson("缺角色的 JSON 剧本", false),
                 scriptJson("LLM 修复后的 JSON 剧本", true)
@@ -191,7 +201,7 @@ class LlmScriptGenerationAgentTests {
     }
 
     @Test
-    void generateRepairsUnsafeDoubleQuotesFromMockClientBeforeFallback() {
+    void generateRepairsUnsafeDoubleQuotesFromMockClient() {
         RecordingAiClient client = new RecordingAiClient(validYaml("Gemini 版剧本").replace(
                 "summary: 模型生成的剧本初稿",
                 "summary: \"在一个雨夜，林秋收到一封神秘的匿名信，信中只提到了\"旧剧院\"和\"午夜\"。\""
@@ -208,7 +218,7 @@ class LlmScriptGenerationAgentTests {
     }
 
     @Test
-    void generateNormalizesDialogueObjectFromMockClientBeforeFallback() {
+    void generateNormalizesDialogueObjectFromMockClient() {
         RecordingAiClient client = new RecordingAiClient(validYaml("Gemini 对白兼容测试").replace("""
                         dialogues:
                           - character: char_001
@@ -231,7 +241,7 @@ class LlmScriptGenerationAgentTests {
     }
 
     @Test
-    void generateWrapsTopLevelEpisodeArrayFromMockClientBeforeFallback() {
+    void generateWrapsTopLevelEpisodeArrayFromMockClient() {
         RecordingAiClient client = new RecordingAiClient("""
                 - episode_id: "第1集"
                   title: Gemini 顶层数组兼容测试
@@ -260,7 +270,7 @@ class LlmScriptGenerationAgentTests {
     }
 
     @Test
-    void generateUnwrapsScriptContainerFromMockClientBeforeFallback() {
+    void generateUnwrapsScriptContainerFromMockClient() {
         RecordingAiClient client = new RecordingAiClient("""
                 script:
                   project:
@@ -301,34 +311,33 @@ class LlmScriptGenerationAgentTests {
     }
 
     @Test
-    void generateFallsBackWhenMockClientReturnsInvalidYaml() {
+    void generatePreservesRawResponseWhenMockClientReturnsInvalidYaml() {
         RecordingAiClient client = new RecordingAiClient("project:\n  title: 缺少必要结构\n");
         LlmScriptGenerationAgent agent = createAgent(client);
 
-        String yaml = agent.generate(sampleProject());
+        ScriptGenerationResult result = agent.generateResult(sampleProject());
 
-        assertThat(validator.validate(yaml).valid()).isTrue();
-        assertThat(yaml).contains("title: 雨夜来信");
-        assertThat(yaml).contains("episodes:");
+        assertThat(result.requiresReview()).isTrue();
+        assertThat(result.rawLlmResponse()).contains("缺少必要结构");
+        assertThat(validator.validate(result.yaml()).valid()).isFalse();
     }
 
     @Test
-    void generateFallsBackWhenMockClientThrows() {
+    void generateMarksReviewRequiredWhenMockClientThrows() {
         RecordingAiClient client = new RecordingAiClient(new RuntimeException("network timeout"));
         LlmScriptGenerationAgent agent = createAgent(client);
 
-        String yaml = agent.generate(sampleProject());
+        ScriptGenerationResult result = agent.generateResult(sampleProject());
 
-        assertThat(validator.validate(yaml).valid()).isTrue();
-        assertThat(yaml).contains("title: 雨夜来信");
-        assertThat(yaml).contains("episodes:");
+        assertThat(result.requiresReview()).isTrue();
+        assertThat(result.rawLlmResponse()).isBlank();
+        assertThat(result.message()).contains("network timeout");
     }
 
     private LlmScriptGenerationAgent createAgent(AiClient client) {
         return new LlmScriptGenerationAgent(
                 client,
-                validator,
-                new RuleBasedScriptGenerationAgent()
+                validator
         );
     }
 

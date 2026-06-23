@@ -18,6 +18,7 @@ import com.scriptforge.novelscript.mapper.NovelContentMapper;
 import com.scriptforge.novelscript.mapper.ProjectMapper;
 import com.scriptforge.novelscript.mapper.ScriptResultMapper;
 import com.scriptforge.novelscript.util.ChapterJsonConverter;
+import com.scriptforge.novelscript.util.FailedEpisodeJsonConverter;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,17 +36,20 @@ public class ProjectService {
     private final AdaptationSettingMapper adaptationSettingMapper;
     private final ScriptResultMapper scriptResultMapper;
     private final ChapterJsonConverter chapterJsonConverter;
+    private final FailedEpisodeJsonConverter failedEpisodeJsonConverter;
 
     public ProjectService(ProjectMapper projectMapper,
                           NovelContentMapper novelContentMapper,
                           AdaptationSettingMapper adaptationSettingMapper,
                           ScriptResultMapper scriptResultMapper,
-                          ChapterJsonConverter chapterJsonConverter) {
+                          ChapterJsonConverter chapterJsonConverter,
+                          FailedEpisodeJsonConverter failedEpisodeJsonConverter) {
         this.projectMapper = projectMapper;
         this.novelContentMapper = novelContentMapper;
         this.adaptationSettingMapper = adaptationSettingMapper;
         this.scriptResultMapper = scriptResultMapper;
         this.chapterJsonConverter = chapterJsonConverter;
+        this.failedEpisodeJsonConverter = failedEpisodeJsonConverter;
     }
 
     @Transactional
@@ -119,7 +123,7 @@ public class ProjectService {
                 project.getUpdatedAt(),
                 chapterCount > 0,
                 chapterCount,
-                project.getScriptResult().hasYaml()
+                project.getScriptResult().hasGeneratedContent()
         );
     }
 
@@ -133,6 +137,13 @@ public class ProjectService {
     void markScriptReady(Long projectId) {
         ProjectRecord record = requireProjectRecord(projectId);
         record.setStatus("script_ready");
+        record.setUpdatedAt(LocalDateTime.now());
+        projectMapper.updateById(record);
+    }
+
+    void markScriptNeedsReview(Long projectId) {
+        ProjectRecord record = requireProjectRecord(projectId);
+        record.setStatus("script_review");
         record.setUpdatedAt(LocalDateTime.now());
         projectMapper.updateById(record);
     }
@@ -178,6 +189,10 @@ public class ProjectService {
         }
         ScriptResult scriptResult = project.getScriptResult();
         scriptResult.setYaml(record.getYaml());
+        scriptResult.setRawLlmResponse(record.getRawLlmResponse());
+        scriptResult.setGenerationStatus(record.getGenerationStatus());
+        scriptResult.setGenerationMessage(record.getGenerationMessage());
+        scriptResult.setFailedEpisodes(failedEpisodeJsonConverter.fromJson(record.getFailedEpisodesJson()));
         scriptResult.setUpdatedAt(toInstant(record.getUpdatedAt()));
     }
 

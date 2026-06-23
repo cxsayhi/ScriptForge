@@ -1,6 +1,7 @@
 package com.scriptforge.novelscript.controller;
 
 import com.scriptforge.novelscript.common.ApiResponse;
+import com.scriptforge.novelscript.dto.request.FailedEpisodeUpdateRequest;
 import com.scriptforge.novelscript.dto.request.ScriptUpdateRequest;
 import com.scriptforge.novelscript.dto.response.RepairResponse;
 import com.scriptforge.novelscript.dto.response.ScriptQualityResponse;
@@ -53,6 +54,13 @@ public class ScriptController {
     @PutMapping
     public ApiResponse<ScriptResponse> update(@PathVariable Long projectId, @Valid @RequestBody ScriptUpdateRequest request) {
         return ApiResponse.success(scriptService.update(projectId, request.yaml()));
+    }
+
+    @PutMapping("/failed-episodes/{episodeId}")
+    public ApiResponse<ScriptResponse> updateFailedEpisode(@PathVariable Long projectId,
+                                                            @PathVariable int episodeId,
+                                                            @Valid @RequestBody FailedEpisodeUpdateRequest request) {
+        return ApiResponse.success(scriptService.updateFailedEpisode(projectId, episodeId, request.rawResponse()));
     }
 
     @PostMapping("/validate")

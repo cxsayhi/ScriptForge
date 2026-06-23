@@ -25,9 +25,10 @@ const project = computed(() => projectStore.currentProject)
 const hasNovel = computed(() => Boolean(project.value?.hasNovel))
 const hasEnoughChapters = computed(() => (project.value?.chapterCount || 0) >= 3)
 const hasSettings = computed(() => Boolean(setting.value))
-const hasScript = computed(() => Boolean(project.value?.hasScript || script.value?.yaml))
+const needsReview = computed(() => script.value?.generationStatus === 'needs_review' || status.value?.status === 'needs_review')
+const hasScript = computed(() => Boolean(project.value?.hasScript || script.value?.yaml || script.value?.rawLlmResponse))
 const canGenerate = computed(() => Boolean(project.value && hasNovel.value && hasEnoughChapters.value && hasSettings.value))
-const statusText = computed(() => status.value?.message || (hasScript.value ? '剧本初稿已生成' : '尚未生成剧本'))
+const statusText = computed(() => script.value?.generationMessage || status.value?.message || (hasScript.value ? '剧本初稿已生成' : '尚未生成剧本'))
 const isRunning = computed(() => generating.value || status.value?.status === 'running')
 
 const checks = computed(() => [
@@ -69,7 +70,7 @@ const stats = computed(() => [
   {
     label: '生成状态',
     value: status.value?.status || 'idle',
-    tone: status.value?.status === 'failed' ? ('warn' as const) : hasScript.value ? ('ready' as const) : ('neutral' as const)
+    tone: needsReview.value || status.value?.status === 'failed' ? ('warn' as const) : hasScript.value ? ('ready' as const) : ('neutral' as const)
   },
   {
     label: '章节',
@@ -155,7 +156,11 @@ async function generateScript() {
   try {
     const result = await scriptApi.generateScript(props.projectId)
     await refreshAfterGeneration(result)
-    ElMessage.success('剧本初稿已生成')
+    if (result.generationStatus === 'needs_review') {
+      ElMessage.warning('LLM 返回内容已保留，但需要人工审核或修复')
+    } else {
+      ElMessage.success('剧本初稿已生成')
+    }
     router.push(`/projects/${props.projectId}/script`)
   } catch (error) {
     status.value = await scriptApi.getScriptStatus(props.projectId).catch(() => status.value)
@@ -187,7 +192,11 @@ async function regenerateScript() {
   try {
     const result = await scriptApi.regenerateScript(props.projectId)
     await refreshAfterGeneration(result)
-    ElMessage.success('剧本已重新生成')
+    if (result.generationStatus === 'needs_review') {
+      ElMessage.warning('LLM 返回内容已保留，但需要人工审核或修复')
+    } else {
+      ElMessage.success('剧本已重新生成')
+    }
     router.push(`/projects/${props.projectId}/script`)
   } catch (error) {
     status.value = await scriptApi.getScriptStatus(props.projectId).catch(() => status.value)
@@ -238,6 +247,16 @@ async function regenerateScript() {
           show-icon
           title="生成失败"
           :description="errorText"
+        />
+
+        <el-alert
+          v-else-if="needsReview"
+          class="generate-alert"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="生成结果待审核"
+          :description="statusText"
         />
 
         <ul class="generate-check-list">

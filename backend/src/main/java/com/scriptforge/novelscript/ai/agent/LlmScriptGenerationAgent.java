@@ -7,6 +7,7 @@ import com.scriptforge.novelscript.ai.client.AiClient;
 import com.scriptforge.novelscript.dto.response.ValidationResult;
 import com.scriptforge.novelscript.entity.AdaptationSetting;
 import com.scriptforge.novelscript.entity.Chapter;
+import com.scriptforge.novelscript.entity.FailedEpisode;
 import com.scriptforge.novelscript.entity.ProjectWorkspace;
 import com.scriptforge.novelscript.util.YamlScriptValidator;
 import org.slf4j.Logger;
@@ -49,77 +50,85 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
 
     private final AiClient aiClient;
     private final YamlScriptValidator validator;
-    private final RuleBasedScriptGenerationAgent fallbackAgent;
 
     public LlmScriptGenerationAgent(AiClient aiClient,
-                                    YamlScriptValidator validator,
-                                    RuleBasedScriptGenerationAgent fallbackAgent) {
+                                    YamlScriptValidator validator) {
         this.aiClient = aiClient;
         this.validator = validator;
-        this.fallbackAgent = fallbackAgent;
     }
 
     @Override
-    public String generate(ProjectWorkspace project) {
+    public ScriptGenerationResult generateResult(ProjectWorkspace project) {
+        GenerationTrace trace = new GenerationTrace();
         try {
-            Draft draft = generateSegmentedJsonDraft(project);
+            Draft draft = generateSegmentedJsonDraft(project, trace);
+            trace.setCandidateYaml(draft.yaml());
+            if (trace.hasEpisodeFailures()) {
+                return reviewRequired(project, trace, trace.failureMessage());
+            }
             ValidationResult validation = validator.validate(draft.yaml());
             if (validation.valid()) {
-                return draft.yaml();
+                return ScriptGenerationResult.completed(draft.yaml());
             }
 
-            Draft repaired = repairWithLlm(project, draft.yaml(), validation.errors());
+            Draft repaired = repairWithLlm(project, draft.yaml(), validation.errors(), trace);
             if (repaired != null) {
+                trace.setCandidateYaml(repaired.yaml());
                 ValidationResult repairedValidation = validator.validate(repaired.yaml());
                 if (repairedValidation.valid()) {
-                    return repaired.yaml();
+                    return ScriptGenerationResult.completed(repaired.yaml());
                 }
                 log.warn(
-                        "LLM script repair failed validation, falling back to rule-based agent: {}. raw={}, repaired={}",
+                        "LLM script repair failed validation; preserving result for review: {}. raw={}, repaired={}",
                         repairedValidation.errors(),
                         preview(repaired.raw()),
                         preview(repaired.yaml())
                 );
+                return reviewRequired(project, trace, "完整剧本修复后仍未通过校验：" + String.join("；", repairedValidation.errors()));
             } else {
                 log.warn(
-                        "LLM script result failed validation and repair failed, falling back to rule-based agent: {}. raw={}, repaired={}",
+                        "LLM script result failed validation and repair failed; preserving result for review: {}. raw={}, repaired={}",
                         validation.errors(),
                         preview(draft.raw()),
                         preview(draft.yaml())
                 );
+                return reviewRequired(project, trace, "完整剧本未通过校验，LLM 修复失败：" + String.join("；", validation.errors()));
             }
         } catch (RuntimeException exception) {
             if (exception instanceof StructuredResponseException structuredException) {
                 log.warn(
-                        "LLM script generation failed, falling back to rule-based agent: {}. raw={}",
+                        "LLM script generation failed; preserving result for review: {}. raw={}",
                         structuredException.getMessage(),
                         preview(structuredException.raw())
                 );
             } else {
-                log.warn("LLM script generation failed, falling back to rule-based agent: {}", exception.getMessage());
+                log.warn("LLM script generation failed; preserving result for review: {}", exception.getMessage());
             }
             log.debug("LLM script generation failure details", exception);
+            return reviewRequired(project, trace, "LLM 生成或修复失败：" + safeMessage(exception));
         }
-        return fallbackAgent.generate(project);
     }
 
-    private Draft generateSegmentedJsonDraft(ProjectWorkspace project) {
+    private Draft generateSegmentedJsonDraft(ProjectWorkspace project, GenerationTrace trace) {
         String outlineRaw = aiClient.chatJsonWithSystem(
                 JSON_SYSTEM_PROMPT,
                 buildOutlinePrompt(project),
                 "script_outline",
                 outlineSchema()
         );
+        trace.appendRaw("outline", outlineRaw);
         Map<String, Object> outline = parseMapOrRepair(
                 outlineRaw,
                 project,
                 "script_outline",
                 outlineSchema(),
-                "outline planning response"
+                "outline planning response",
+                trace
         );
         int targetEpisodes = targetEpisodeCount(project, outline);
         if (containsCompleteScript(outline, targetEpisodes)) {
             Map<String, Object> completeScript = normalizeScriptRoot(outline, project, targetEpisodes);
+            trace.setPartial(completeScript, listValue(completeScript.get("episodes")));
             return new Draft(toYaml(completeScript, project), outlineRaw);
         }
 
@@ -130,41 +139,53 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
         List<Object> episodeOutlines = listValue(firstPresent(outline, "episode_outlines", "episodeOutlines", "episodes"));
         List<List<Chapter>> chapterAssignments = chapterAssignments(project.getNovelContent().getChapters(), episodeOutlines, targetEpisodes);
         List<Object> episodes = new ArrayList<>();
+        trace.setPartial(root, episodes);
         StringBuilder raw = new StringBuilder(outlineRaw);
         for (int episodeIndex = 1; episodeIndex <= targetEpisodes; episodeIndex++) {
-            Object episodeOutline = episodeIndex <= episodeOutlines.size() ? episodeOutlines.get(episodeIndex - 1) : Map.of();
-            String episodeRaw = aiClient.chatJsonWithSystem(
-                    JSON_SYSTEM_PROMPT,
-                    buildEpisodePrompt(project, root, episodeOutline, chapterAssignments.get(episodeIndex - 1), episodeIndex, targetEpisodes),
-                    "script_episode",
-                    episodeEnvelopeSchema()
-            );
-            raw.append("\n\n--- episode ").append(episodeIndex).append(" raw ---\n").append(episodeRaw);
-            Object parsedEpisode = parseValueOrRepair(
-                    episodeRaw,
-                    project,
-                    "script_episode",
-                    episodeEnvelopeSchema(),
-                    "episode " + episodeIndex + " response"
-            );
+            int rawStart = trace.rawLength();
             try {
-                episodes.add(extractEpisode(parsedEpisode, episodeIndex));
-            } catch (RuntimeException exception) {
-                Object repairedEpisode = repairStructuredResponse(
+                Object episodeOutline = episodeIndex <= episodeOutlines.size() ? episodeOutlines.get(episodeIndex - 1) : Map.of();
+                String episodeRaw = aiClient.chatJsonWithSystem(
+                        JSON_SYSTEM_PROMPT,
+                        buildEpisodePrompt(project, root, episodeOutline, chapterAssignments.get(episodeIndex - 1), episodeIndex, targetEpisodes),
+                        "script_episode",
+                        episodeEnvelopeSchema()
+                );
+                trace.appendRaw("episode " + episodeIndex, episodeRaw);
+                raw.append("\n\n--- episode ").append(episodeIndex).append(" raw ---\n").append(episodeRaw);
+                Object parsedEpisode = parseValueOrRepair(
                         episodeRaw,
                         project,
                         "script_episode",
                         episodeEnvelopeSchema(),
-                        "episode " + episodeIndex + " response did not contain the requested episode: " + exception.getMessage()
+                        "episode " + episodeIndex + " response",
+                        trace
                 );
-                episodes.add(extractEpisode(repairedEpisode, episodeIndex));
+                try {
+                    episodes.add(extractEpisode(parsedEpisode, episodeIndex));
+                } catch (RuntimeException exception) {
+                    Object repairedEpisode = repairStructuredResponse(
+                            episodeRaw,
+                            project,
+                            "script_episode",
+                            episodeEnvelopeSchema(),
+                            "episode " + episodeIndex + " response did not contain the requested episode: " + exception.getMessage(),
+                            trace
+                    );
+                    episodes.add(extractEpisode(repairedEpisode, episodeIndex));
+                }
+            } catch (RuntimeException exception) {
+                trace.addEpisodeFailure(episodeIndex, safeMessage(exception), trace.rawSince(rawStart));
             }
         }
         root.put("episodes", episodes);
         return new Draft(toYaml(root, project), raw.toString());
     }
 
-    private Draft repairWithLlm(ProjectWorkspace project, String invalidYaml, List<String> errors) {
+    private Draft repairWithLlm(ProjectWorkspace project,
+                                String invalidYaml,
+                                List<String> errors,
+                                GenerationTrace trace) {
         try {
             String repairRaw = aiClient.chatJsonWithSystem(
                     REPAIR_SYSTEM_PROMPT,
@@ -172,6 +193,7 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
                     "script_result",
                     scriptSchema()
             );
+            trace.appendRaw("full script repair", repairRaw);
             Map<String, Object> repaired = parseStructuredMap(repairRaw, project);
             Map<String, Object> normalized = normalizeScriptRoot(repaired, project, targetEpisodeCount(project, repaired));
             return new Draft(toYaml(normalized, project), repairRaw);
@@ -186,11 +208,12 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
                                                  ProjectWorkspace project,
                                                  String schemaName,
                                                  Map<String, Object> schema,
-                                                 String context) {
+                                                 String context,
+                                                 GenerationTrace trace) {
         try {
             return parseStructuredMap(response, project);
         } catch (RuntimeException exception) {
-            Object repaired = repairStructuredResponse(response, project, schemaName, schema, context + ": " + exception.getMessage());
+            Object repaired = repairStructuredResponse(response, project, schemaName, schema, context + ": " + exception.getMessage(), trace);
             if (repaired instanceof Map<?, ?> map) {
                 return mutableMap(map);
             }
@@ -202,11 +225,12 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
                                       ProjectWorkspace project,
                                       String schemaName,
                                       Map<String, Object> schema,
-                                      String context) {
+                                      String context,
+                                      GenerationTrace trace) {
         try {
             return parseStructuredValue(response, project);
         } catch (RuntimeException exception) {
-            return repairStructuredResponse(response, project, schemaName, schema, context + ": " + exception.getMessage());
+            return repairStructuredResponse(response, project, schemaName, schema, context + ": " + exception.getMessage(), trace);
         }
     }
 
@@ -214,13 +238,15 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
                                             ProjectWorkspace project,
                                             String schemaName,
                                             Map<String, Object> schema,
-                                            String context) {
+                                            String context,
+                                            GenerationTrace trace) {
         String repairRaw = aiClient.chatJsonWithSystem(
                 REPAIR_SYSTEM_PROMPT,
                 buildRawResponseRepairPrompt(project, response, context),
                 schemaName,
                 schema
         );
+        trace.appendRaw(schemaName + " repair", repairRaw);
         try {
             return parseStructuredValue(repairRaw, project);
         } catch (RuntimeException exception) {
@@ -813,6 +839,40 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
         return compact.substring(0, 800) + "...";
     }
 
+    private ScriptGenerationResult reviewRequired(ProjectWorkspace project,
+                                                  GenerationTrace trace,
+                                                  String message) {
+        return ScriptGenerationResult.needsReview(
+                bestAvailableYaml(project, trace),
+                trace.rawLlmResponse(),
+                message,
+                trace.failedEpisodes()
+        );
+    }
+
+    private String bestAvailableYaml(ProjectWorkspace project, GenerationTrace trace) {
+        if (trace.candidateYaml() != null && !trace.candidateYaml().isBlank()) {
+            return trace.candidateYaml();
+        }
+        if (trace.partialRoot() == null) {
+            return "";
+        }
+        try {
+            Map<String, Object> partial = new LinkedHashMap<>(trace.partialRoot());
+            partial.put("episodes", new ArrayList<>(trace.partialEpisodes()));
+            return toYaml(partial, project);
+        } catch (RuntimeException exception) {
+            log.warn("Unable to serialize partial LLM draft for review: {}", exception.getMessage());
+            return "";
+        }
+    }
+
+    private String safeMessage(RuntimeException exception) {
+        return exception.getMessage() == null || exception.getMessage().isBlank()
+                ? exception.getClass().getSimpleName()
+                : exception.getMessage();
+    }
+
     private Map<String, Object> scriptSchema() {
         Map<String, Object> properties = new LinkedHashMap<>();
         properties.put("project", projectSchema());
@@ -937,6 +997,85 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
     }
 
     private record Draft(String yaml, String raw) {
+    }
+
+    private static class GenerationTrace {
+
+        private final StringBuilder rawResponses = new StringBuilder();
+        private Map<String, Object> partialRoot;
+        private List<Object> partialEpisodes = List.of();
+        private String candidateYaml;
+        private final List<FailedEpisode> episodeFailures = new ArrayList<>();
+
+        void appendRaw(String stage, String rawResponse) {
+            if (rawResponse == null || rawResponse.isBlank()) {
+                return;
+            }
+            if (rawResponses.length() > 0) {
+                rawResponses.append("\n\n");
+            }
+            rawResponses.append("--- ").append(stage).append(" ---\n").append(rawResponse);
+        }
+
+        void setPartial(Map<String, Object> root, List<Object> episodes) {
+            this.partialRoot = root;
+            this.partialEpisodes = episodes;
+        }
+
+        void setCandidateYaml(String candidateYaml) {
+            this.candidateYaml = candidateYaml;
+        }
+
+        int rawLength() {
+            return rawResponses.length();
+        }
+
+        String rawSince(int start) {
+            if (start < 0 || start >= rawResponses.length()) {
+                return "";
+            }
+            return rawResponses.substring(start).trim();
+        }
+
+        void addEpisodeFailure(int episodeIndex, String reason, String rawResponse) {
+            episodeFailures.add(FailedEpisode.needsReview(
+                    episodeIndex,
+                    "第 " + episodeIndex + " 集生成失败：" + reason,
+                    rawResponse
+            ));
+        }
+
+        boolean hasEpisodeFailures() {
+            return !episodeFailures.isEmpty();
+        }
+
+        String failureMessage() {
+            return episodeFailures.stream()
+                    .map(FailedEpisode::reason)
+                    .reduce((first, second) -> first + "；" + second)
+                    .orElse("LLM 剧集生成失败")
+                    + "。原始 LLM 回复和已完成剧集已保留，请人工审核。";
+        }
+
+        String rawLlmResponse() {
+            return rawResponses.toString();
+        }
+
+        Map<String, Object> partialRoot() {
+            return partialRoot;
+        }
+
+        List<Object> partialEpisodes() {
+            return partialEpisodes;
+        }
+
+        String candidateYaml() {
+            return candidateYaml;
+        }
+
+        List<FailedEpisode> failedEpisodes() {
+            return List.copyOf(episodeFailures);
+        }
     }
 
     private static class StructuredResponseException extends RuntimeException {

@@ -41,6 +41,10 @@ CREATE TABLE script_result (
     project_id BIGINT NOT NULL,
     yaml LONGTEXT NOT NULL,
     validation_status VARCHAR(40) NOT NULL,
+    raw_llm_response LONGTEXT,
+    generation_status VARCHAR(40) NOT NULL DEFAULT 'completed',
+    generation_message VARCHAR(1000),
+    failed_episodes_json LONGTEXT,
     updated_at DATETIME NOT NULL,
     CONSTRAINT fk_script_project FOREIGN KEY (project_id) REFERENCES project(id)
 );

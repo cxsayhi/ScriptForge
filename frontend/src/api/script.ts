@@ -1,6 +1,7 @@
 import http, { unwrap } from './http'
 import type {
   GenerationStatus,
+  FailedEpisodeUpdatePayload,
   ProjectId,
   RepairResponse,
   ScriptResponse,
@@ -34,6 +35,10 @@ export function updateScript(projectId: ProjectId, payload: ScriptUpdatePayload)
   return unwrap<ScriptResponse>(http.put(`/projects/${projectId}/script`, payload))
 }
 
+export function updateFailedEpisode(projectId: ProjectId, episodeId: number, payload: FailedEpisodeUpdatePayload) {
+  return unwrap<ScriptResponse>(http.put(`/projects/${projectId}/script/failed-episodes/${episodeId}`, payload))
+}
+
 export function validateScript(projectId: ProjectId, payload: ScriptUpdatePayload) {
   return unwrap<ValidationResult>(http.post(`/projects/${projectId}/script/validate`, payload))
 }
@@ -48,6 +53,7 @@ export const scriptApi = {
   getScriptStatus,
   getScript,
   updateScript,
+  updateFailedEpisode,
   validateScript,
   repairScript
 }

@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import RouteShell from '@/components/RouteShell.vue'
 import { scriptApi } from '@/api/script'
-import type { ExportFormat, ScriptResponse, ValidationResult } from '@/api/types'
+import type { ExportFormat, FailedEpisode, ScriptResponse, ValidationResult } from '@/api/types'
 import { downloadProjectExport } from '@/utils/download'
 import { useProjectStore } from '@/stores/projectStore'
 
@@ -26,6 +26,11 @@ const project = computed(() => projectStore.currentProject)
 const hasYaml = computed(() => yaml.value.trim().length > 0)
 const hasSavedScript = computed(() => savedYaml.value.trim().length > 0)
 const hasUnsavedChanges = computed(() => yaml.value !== savedYaml.value)
+const needsReview = computed(() => script.value?.generationStatus === 'needs_review')
+const hasRawLlmResponse = computed(() => Boolean(script.value?.rawLlmResponse?.trim()))
+const failedEpisodes = computed<FailedEpisode[]>(() => script.value?.failedEpisodes || [])
+const failedEpisodeDrafts = ref<Record<number, string>>({})
+const failedEpisodeSavingId = ref<number | null>(null)
 const validationState = computed(() => {
   if (!validation.value) return '未校验'
   return validation.value.valid ? '通过' : '失败'
@@ -62,6 +67,15 @@ watch(
     loadScript(projectId).catch(() => undefined)
   },
   { immediate: true }
+)
+
+watch(
+  script,
+  (currentScript) => {
+    failedEpisodeDrafts.value = Object.fromEntries(
+      (currentScript?.failedEpisodes || []).map((episode) => [episode.episodeId, episode.rawResponse || ''])
+    )
+  }
 )
 
 function formatDate(value?: string) {
@@ -159,12 +173,19 @@ async function repairScript() {
         projectId: props.projectId,
         yaml: repaired.yaml || '',
         validationResult: repaired.validationResult,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
+        generationStatus: repaired.generationStatus,
+        generationMessage: repaired.generationMessage,
+        rawLlmResponse: repaired.rawLlmResponse,
+        failedEpisodes: repaired.failedEpisodes
       }
       await projectStore.fetchProject(props.projectId)
     }
-    ElMessage[repaired.validationResult.valid ? 'success' : 'warning'](
-      repaired.validationResult.valid ? 'YAML 已修复并保存' : '已尝试修复，仍需手动调整'
+    const remainsUnderReview = repaired.generationStatus === 'needs_review'
+    ElMessage[repaired.validationResult.valid && !remainsUnderReview ? 'success' : 'warning'](
+      repaired.validationResult.valid
+        ? remainsUnderReview ? 'YAML 格式已修复，但失败剧集仍需处理' : 'YAML 已修复并保存'
+        : '已尝试修复，仍需手动调整'
     )
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : 'YAML 修复失败'
@@ -205,6 +226,40 @@ function restoreSavedYaml() {
   yaml.value = savedYaml.value
   validation.value = script.value?.validationResult || null
   ElMessage.info('已恢复到最近保存版本')
+}
+
+async function copyText(text: string, successMessage: string) {
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success(successMessage)
+  } catch {
+    ElMessage.warning('复制失败，请手动选择并复制文本')
+  }
+}
+
+async function copyRawLlmResponse() {
+  await copyText(script.value?.rawLlmResponse || '', '原始 LLM 回复已复制')
+}
+
+async function saveFailedEpisode(failedEpisode: FailedEpisode) {
+  const rawResponse = failedEpisodeDrafts.value[failedEpisode.episodeId]?.trim() || ''
+  if (!rawResponse) {
+    ElMessage.warning(`第 ${failedEpisode.episodeId} 集内容不能为空`)
+    return
+  }
+
+  failedEpisodeSavingId.value = failedEpisode.episodeId
+  errorText.value = ''
+  try {
+    script.value = await scriptApi.updateFailedEpisode(props.projectId, failedEpisode.episodeId, { rawResponse })
+    await projectStore.fetchProject(props.projectId)
+    ElMessage.success(`第 ${failedEpisode.episodeId} 集待审核内容已保存`)
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : `第 ${failedEpisode.episodeId} 集保存失败`
+  } finally {
+    failedEpisodeSavingId.value = null
+  }
 }
 </script>
 
@@ -259,6 +314,82 @@ function restoreSavedYaml() {
           title="尚未生成剧本"
           description="可以先返回生成页面生成初稿，也可以在这里粘贴合法 YAML 后保存。"
         />
+
+        <el-alert
+          v-if="needsReview"
+          class="script-alert"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="LLM 结果待审核"
+          :description="script?.generationMessage || '原始模型回复已保留。可复制后手动整理为 YAML，或返回生成页再次尝试。'"
+        />
+
+        <section v-if="failedEpisodes.length" class="failed-episode-section">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Failed Episodes</p>
+              <h3>待审核剧集</h3>
+            </div>
+            <el-tag type="warning" effect="plain">{{ failedEpisodes.length }} 集待处理</el-tag>
+          </div>
+
+          <el-collapse class="failed-episode-list">
+            <el-collapse-item
+              v-for="failedEpisode in failedEpisodes"
+              :key="failedEpisode.episodeId"
+              :name="`failed-${failedEpisode.episodeId}`"
+            >
+              <template #title>
+                <span>第 {{ failedEpisode.episodeId }} 集</span>
+                <el-tag class="failed-episode-status" type="warning" size="small" effect="plain">
+                  {{ failedEpisode.status === 'edited' ? '已编辑，待审核' : '生成失败' }}
+                </el-tag>
+              </template>
+              <p class="script-helper-text">{{ failedEpisode.reason }}</p>
+              <el-input
+                v-model="failedEpisodeDrafts[failedEpisode.episodeId]"
+                type="textarea"
+                resize="vertical"
+                :rows="10"
+                placeholder="在这里查看或修改该集保留的 LLM 原始内容"
+              />
+              <div class="panel-actions split-actions">
+                <span class="script-helper-text">修改会单独保存，不会覆盖正式 YAML。</span>
+                <div>
+                  <el-button text @click="copyText(failedEpisodeDrafts[failedEpisode.episodeId] || '', `第 ${failedEpisode.episodeId} 集内容已复制`)">
+                    复制内容
+                  </el-button>
+                  <el-button
+                    type="primary"
+                    :loading="failedEpisodeSavingId === failedEpisode.episodeId"
+                    @click="saveFailedEpisode(failedEpisode)"
+                  >
+                    保存修改
+                  </el-button>
+                </div>
+              </div>
+            </el-collapse-item>
+          </el-collapse>
+        </section>
+
+        <el-collapse v-if="hasRawLlmResponse" class="script-raw-response">
+          <el-collapse-item name="raw-llm-response">
+            <template #title>
+              <span>查看保留的原始 LLM 回复</span>
+            </template>
+            <div class="panel-actions">
+              <el-button text @click="copyRawLlmResponse">复制原始回复</el-button>
+            </div>
+            <el-input
+              :model-value="script?.rawLlmResponse || ''"
+              type="textarea"
+              resize="vertical"
+              :rows="10"
+              readonly
+            />
+          </el-collapse-item>
+        </el-collapse>
 
         <el-input
           v-model="yaml"
