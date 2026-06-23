@@ -1,3 +1,4 @@
+
 package com.scriptforge.novelscript.ai.prompt;
 
 import com.scriptforge.novelscript.entity.AdaptationSetting;
@@ -71,3 +72,4 @@ public class PromptBuilder {
         }
     }
 }
+

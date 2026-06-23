@@ -1,7 +1,6 @@
 package com.scriptforge.novelscript.ai.agent;
 
 import com.scriptforge.novelscript.ai.client.AiClient;
-import com.scriptforge.novelscript.ai.prompt.PromptBuilder;
 import com.scriptforge.novelscript.entity.Chapter;
 import com.scriptforge.novelscript.entity.ProjectWorkspace;
 import com.scriptforge.novelscript.util.YamlScriptValidator;
@@ -22,7 +21,7 @@ class LlmScriptGenerationAgentTests {
         RecordingAiClient client = new RecordingAiClient(validYaml("LLM 版剧本"));
         LlmScriptGenerationAgent agent = createAgent(client);
 
-        String yaml = agent.generate(sampleProject());
+        String yaml = agent.generate(singleEpisodeProject());
 
         assertThat(validator.validate(yaml).valid()).isTrue();
         assertThat(yaml).contains("title: LLM 版剧本");
@@ -52,6 +51,66 @@ class LlmScriptGenerationAgentTests {
                 .doesNotContain("name: 主角");
         assertThat(client.schemaNames)
                 .containsExactly("script_outline", "script_episode", "script_episode", "script_episode");
+    }
+
+    @Test
+    void generateKeepsChapterAssignmentsChronologicalWhenTargetEpisodesExceedChapterCount() {
+        RecordingAiClient client = new RecordingAiClient(
+                outlineJson(),
+                episodeJson(1, "雨夜来信", "林秋收到匿名信并决定出门。"),
+                episodeJson(2, "雨夜余波", "林秋继续追查匿名信。"),
+                episodeJson(3, "旧剧院", "林秋在旧剧院发现旧照片。"),
+                episodeJson(4, "剧院暗门", "林秋追查旧照片的来源。"),
+                episodeJson(5, "回声", "林秋用回声线索锁定真相。")
+        );
+        LlmScriptGenerationAgent agent = createAgent(client);
+        ProjectWorkspace project = sampleProject();
+        project.getSetting().setTargetEpisodes(5);
+
+        String yaml = agent.generate(project);
+
+        assertThat(validator.validate(yaml).valid()).isTrue();
+        assertThat(yaml).contains("target_episodes: 5");
+        assertThat(client.userPrompts).hasSize(6);
+        assertThat(client.userPrompts.get(1)).contains("--- Chapter 1: 第一章 雨夜 ---");
+        assertThat(client.userPrompts.get(2)).contains("--- Chapter 1: 第一章 雨夜 ---");
+        assertThat(client.userPrompts.get(3)).contains("--- Chapter 2: 第二章 旧剧院 ---");
+        assertThat(client.userPrompts.get(4)).contains("--- Chapter 2: 第二章 旧剧院 ---");
+        assertThat(client.userPrompts.get(5)).contains("--- Chapter 3: 第三章 回声 ---");
+    }
+
+    @Test
+    void generateFallsBackWhenEpisodeIdDoesNotMatchRequestedEpisode() {
+        RecordingAiClient client = new RecordingAiClient(
+                outlineJson(),
+                episodeJson(1, "雨夜来信", "林秋收到匿名信并决定出门。"),
+                episodeJson(1, "重复集号", "模型错误地再次返回第一集。")
+        );
+        LlmScriptGenerationAgent agent = createAgent(client);
+
+        String yaml = agent.generate(sampleProject());
+
+        assertThat(validator.validate(yaml).valid()).isTrue();
+        assertThat(yaml).contains("title: 雨夜来信");
+        assertThat(client.schemaNames)
+                .containsExactly("script_outline", "script_episode", "script_episode", "script_episode");
+    }
+
+    @Test
+    void generateKeepsOutlinePromptWithinGlobalDigestBudget() {
+        RecordingAiClient client = new RecordingAiClient(validYaml("长文本预算测试"));
+        LlmScriptGenerationAgent agent = createAgent(client);
+        ProjectWorkspace project = singleEpisodeProject();
+        List<Chapter> chapters = new ArrayList<>();
+        for (int index = 1; index <= 40; index++) {
+            chapters.add(new Chapter(index, "第" + index + "章", "原文内容".repeat(1_000)));
+        }
+        project.getNovelContent().setChapters(chapters);
+
+        String yaml = agent.generate(project);
+
+        assertThat(validator.validate(yaml).valid()).isTrue();
+        assertThat(client.userPrompts.get(0).length()).isLessThanOrEqualTo(13_000);
     }
 
     @Test
@@ -104,7 +163,7 @@ class LlmScriptGenerationAgentTests {
         );
         LlmScriptGenerationAgent agent = createAgent(client);
 
-        String yaml = agent.generate(sampleProject());
+        String yaml = agent.generate(singleEpisodeProject());
 
         assertThat(validator.validate(yaml).valid()).isTrue();
         assertThat(yaml)
@@ -124,7 +183,7 @@ class LlmScriptGenerationAgentTests {
                 """.formatted(validYaml("Fence 版剧本")));
         LlmScriptGenerationAgent agent = createAgent(client);
 
-        String yaml = agent.generate(sampleProject());
+        String yaml = agent.generate(singleEpisodeProject());
 
         assertThat(validator.validate(yaml).valid()).isTrue();
         assertThat(yaml).contains("title: Fence 版剧本");
@@ -139,7 +198,7 @@ class LlmScriptGenerationAgentTests {
         ));
         LlmScriptGenerationAgent agent = createAgent(client);
 
-        String yaml = agent.generate(sampleProject());
+        String yaml = agent.generate(singleEpisodeProject());
 
         assertThat(validator.validate(yaml).valid()).isTrue();
         assertThat(yaml)
@@ -161,7 +220,7 @@ class LlmScriptGenerationAgentTests {
                 """));
         LlmScriptGenerationAgent agent = createAgent(client);
 
-        String yaml = agent.generate(sampleProject());
+        String yaml = agent.generate(singleEpisodeProject());
 
         assertThat(validator.validate(yaml).valid()).isTrue();
         assertThat(yaml)
@@ -190,7 +249,7 @@ class LlmScriptGenerationAgentTests {
                 """);
         LlmScriptGenerationAgent agent = createAgent(client);
 
-        String yaml = agent.generate(sampleProject());
+        String yaml = agent.generate(singleEpisodeProject());
 
         assertThat(validator.validate(yaml).valid()).isTrue();
         assertThat(yaml)
@@ -232,7 +291,7 @@ class LlmScriptGenerationAgentTests {
                 """);
         LlmScriptGenerationAgent agent = createAgent(client);
 
-        String yaml = agent.generate(sampleProject());
+        String yaml = agent.generate(singleEpisodeProject());
 
         assertThat(validator.validate(yaml).valid()).isTrue();
         assertThat(yaml)
@@ -268,7 +327,6 @@ class LlmScriptGenerationAgentTests {
     private LlmScriptGenerationAgent createAgent(AiClient client) {
         return new LlmScriptGenerationAgent(
                 client,
-                new PromptBuilder(),
                 validator,
                 new RuleBasedScriptGenerationAgent()
         );
@@ -285,6 +343,12 @@ class LlmScriptGenerationAgentTests {
         project.getSetting().setScriptType("short_drama");
         project.getSetting().setTargetEpisodes(3);
         project.getSetting().setStyle("悬疑");
+        return project;
+    }
+
+    private ProjectWorkspace singleEpisodeProject() {
+        ProjectWorkspace project = sampleProject();
+        project.getSetting().setTargetEpisodes(1);
         return project;
     }
 

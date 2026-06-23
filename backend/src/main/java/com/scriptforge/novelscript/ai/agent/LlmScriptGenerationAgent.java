@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scriptforge.novelscript.ai.client.AiClient;
-import com.scriptforge.novelscript.ai.prompt.PromptBuilder;
 import com.scriptforge.novelscript.dto.response.ValidationResult;
 import com.scriptforge.novelscript.entity.AdaptationSetting;
 import com.scriptforge.novelscript.entity.Chapter;
@@ -33,6 +32,7 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final int CHAPTER_DIGEST_LIMIT = 900;
     private static final int EPISODE_CHAPTER_LIMIT = 2400;
+    private static final int OUTLINE_DIGEST_MAX_CHARS = 12_000;
 
     private static final String JSON_SYSTEM_PROMPT = """
             You are ScriptForge's script adaptation engine.
@@ -48,17 +48,13 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
             """;
 
     private final AiClient aiClient;
-    @SuppressWarnings("unused")
-    private final PromptBuilder promptBuilder;
     private final YamlScriptValidator validator;
     private final RuleBasedScriptGenerationAgent fallbackAgent;
 
     public LlmScriptGenerationAgent(AiClient aiClient,
-                                    PromptBuilder promptBuilder,
                                     YamlScriptValidator validator,
                                     RuleBasedScriptGenerationAgent fallbackAgent) {
         this.aiClient = aiClient;
-        this.promptBuilder = promptBuilder;
         this.validator = validator;
         this.fallbackAgent = fallbackAgent;
     }
@@ -121,23 +117,25 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
                 outlineSchema(),
                 "outline planning response"
         );
-        if (containsCompleteScript(outline)) {
-            return new Draft(toYaml(outline, project), outlineRaw);
+        int targetEpisodes = targetEpisodeCount(project, outline);
+        if (containsCompleteScript(outline, targetEpisodes)) {
+            Map<String, Object> completeScript = normalizeScriptRoot(outline, project, targetEpisodes);
+            return new Draft(toYaml(completeScript, project), outlineRaw);
         }
 
-        int targetEpisodes = targetEpisodeCount(project, outline);
         Map<String, Object> root = new LinkedHashMap<>();
-        root.put("project", outline.getOrDefault("project", defaultProject(project, targetEpisodes)));
+        root.put("project", normalizedProjectBlock(outline.get("project"), project, targetEpisodes));
         root.put("characters", outline.getOrDefault("characters", List.of(defaultCharacter())));
 
         List<Object> episodeOutlines = listValue(firstPresent(outline, "episode_outlines", "episodeOutlines", "episodes"));
+        List<List<Chapter>> chapterAssignments = chapterAssignments(project.getNovelContent().getChapters(), episodeOutlines, targetEpisodes);
         List<Object> episodes = new ArrayList<>();
         StringBuilder raw = new StringBuilder(outlineRaw);
         for (int episodeIndex = 1; episodeIndex <= targetEpisodes; episodeIndex++) {
             Object episodeOutline = episodeIndex <= episodeOutlines.size() ? episodeOutlines.get(episodeIndex - 1) : Map.of();
             String episodeRaw = aiClient.chatJsonWithSystem(
                     JSON_SYSTEM_PROMPT,
-                    buildEpisodePrompt(project, root, episodeOutline, episodeIndex, targetEpisodes),
+                    buildEpisodePrompt(project, root, episodeOutline, chapterAssignments.get(episodeIndex - 1), episodeIndex, targetEpisodes),
                     "script_episode",
                     episodeEnvelopeSchema()
             );
@@ -175,7 +173,8 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
                     scriptSchema()
             );
             Map<String, Object> repaired = parseStructuredMap(repairRaw, project);
-            return new Draft(toYaml(repaired, project), repairRaw);
+            Map<String, Object> normalized = normalizeScriptRoot(repaired, project, targetEpisodeCount(project, repaired));
+            return new Draft(toYaml(normalized, project), repairRaw);
         } catch (RuntimeException exception) {
             log.warn("LLM script repair retry failed: {}", exception.getMessage());
             log.debug("LLM script repair retry failure details", exception);
@@ -272,13 +271,14 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
                 """.formatted(
                 targetEpisodeCount(project, null),
                 settingsBlock(project),
-                formatChapters(project.getNovelContent().getChapters(), CHAPTER_DIGEST_LIMIT)
+                formatOutlineDigest(project.getNovelContent().getChapters())
         );
     }
 
     private String buildEpisodePrompt(ProjectWorkspace project,
                                       Map<String, Object> root,
                                       Object episodeOutline,
+                                      List<Chapter> sourceChapters,
                                       int episodeIndex,
                                       int targetEpisodes) {
         return """
@@ -311,7 +311,7 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
                 toJson(root.get("project")),
                 toJson(root.get("characters")),
                 toJson(episodeOutline),
-                formatChapters(chaptersForEpisode(project, episodeIndex, targetEpisodes), EPISODE_CHAPTER_LIMIT)
+                formatChapters(sourceChapters, EPISODE_CHAPTER_LIMIT)
         );
     }
 
@@ -460,21 +460,21 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
         if (parsed instanceof Map<?, ?> map) {
             Object episode = firstPresent(map, "episode");
             if (episode != null) {
-                return episode;
+                return requireExpectedEpisode(episode, episodeIndex);
             }
             Object episodesValue = firstPresent(map, "episodes");
             Object selected = selectEpisode(listValue(episodesValue), episodeIndex);
             if (selected != null) {
-                return selected;
+                return requireExpectedEpisode(selected, episodeIndex);
             }
             if (looksLikeEpisode(map)) {
-                return map;
+                return requireExpectedEpisode(map, episodeIndex);
             }
         }
         if (parsed instanceof List<?> list) {
             Object selected = selectEpisode(list, episodeIndex);
             if (selected != null) {
-                return selected;
+                return requireExpectedEpisode(selected, episodeIndex);
             }
         }
         throw new IllegalStateException("LLM episode response does not contain episode " + episodeIndex);
@@ -486,12 +486,26 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
                 return episode;
             }
         }
-        return episodes.isEmpty() ? null : episodes.get(0);
+        return null;
     }
 
-    private boolean containsCompleteScript(Map<String, Object> root) {
+    private Object requireExpectedEpisode(Object value, int expectedEpisodeId) {
+        if (!(value instanceof Map<?, ?> episode)) {
+            throw new IllegalStateException("LLM episode response is not an episode object");
+        }
+        int actualEpisodeId = integer(firstPresent(episode, "episode_id", "episodeId"));
+        if (actualEpisodeId != expectedEpisodeId) {
+            throw new IllegalStateException(
+                    "LLM episode response id %d does not match requested episode %d"
+                            .formatted(actualEpisodeId, expectedEpisodeId)
+            );
+        }
+        return episode;
+    }
+
+    private boolean containsCompleteScript(Map<String, Object> root, int targetEpisodes) {
         Object episodesValue = root.get("episodes");
-        if (!(episodesValue instanceof List<?> episodes) || episodes.isEmpty()) {
+        if (!(episodesValue instanceof List<?> episodes) || !hasExpectedEpisodeSequence(episodes, targetEpisodes)) {
             return false;
         }
         for (Object episode : episodes) {
@@ -500,6 +514,19 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
             }
         }
         return root.containsKey("project") && root.containsKey("characters");
+    }
+
+    private boolean hasExpectedEpisodeSequence(List<?> episodes, int targetEpisodes) {
+        if (episodes.size() != targetEpisodes) {
+            return false;
+        }
+        for (int index = 0; index < episodes.size(); index++) {
+            if (!(episodes.get(index) instanceof Map<?, ?> episode)
+                    || integer(firstPresent(episode, "episode_id", "episodeId")) != index + 1) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private boolean looksLikeEpisode(Map<?, ?> map) {
@@ -522,20 +549,101 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
         return 1;
     }
 
-    private List<Chapter> chaptersForEpisode(ProjectWorkspace project, int episodeIndex, int targetEpisodes) {
-        List<Chapter> chapters = project.getNovelContent().getChapters();
-        if (chapters.isEmpty()) {
-            return List.of();
+    private List<List<Chapter>> chapterAssignments(List<Chapter> chapters,
+                                                    List<Object> episodeOutlines,
+                                                    int targetEpisodes) {
+        List<List<Chapter>> plannedAssignments = chapterAssignmentsFromOutline(chapters, episodeOutlines, targetEpisodes);
+        return plannedAssignments != null ? plannedAssignments : proportionalChapterAssignments(chapters, targetEpisodes);
+    }
+
+    private List<List<Chapter>> chapterAssignmentsFromOutline(List<Chapter> chapters,
+                                                               List<Object> episodeOutlines,
+                                                               int targetEpisodes) {
+        if (chapters.isEmpty() || episodeOutlines.size() != targetEpisodes) {
+            return null;
         }
 
-        int safeTarget = Math.max(1, targetEpisodes);
-        int start = (episodeIndex - 1) * chapters.size() / safeTarget;
-        int end = episodeIndex * chapters.size() / safeTarget;
-        if (end <= start) {
-            start = Math.min(Math.max(episodeIndex - 1, 0), chapters.size() - 1);
-            end = Math.min(start + 1, chapters.size());
+        Map<Integer, Chapter> chaptersByNumber = new LinkedHashMap<>();
+        Map<Integer, Integer> chapterPositions = new LinkedHashMap<>();
+        for (int index = 0; index < chapters.size(); index++) {
+            Chapter chapter = chapters.get(index);
+            chaptersByNumber.put(chapter.index(), chapter);
+            chapterPositions.put(chapter.index(), index);
         }
-        return chapters.subList(start, end);
+
+        List<List<Chapter>> assignments = new ArrayList<>();
+        int previousChapterPosition = -1;
+        for (int episodeIndex = 0; episodeIndex < targetEpisodes; episodeIndex++) {
+            if (!(episodeOutlines.get(episodeIndex) instanceof Map<?, ?> outline)
+                    || integer(firstPresent(outline, "episode_id", "episodeId")) != episodeIndex + 1) {
+                return null;
+            }
+            Object chapterNumbersValue = firstPresent(outline, "chapter_numbers", "chapterNumbers");
+            if (!(chapterNumbersValue instanceof List<?> chapterNumbers) || chapterNumbers.isEmpty()) {
+                return null;
+            }
+
+            List<Chapter> assignment = new ArrayList<>();
+            int previousInEpisode = -1;
+            for (Object chapterNumberValue : chapterNumbers) {
+                int chapterNumber = integer(chapterNumberValue);
+                Chapter chapter = chaptersByNumber.get(chapterNumber);
+                Integer chapterPosition = chapterPositions.get(chapterNumber);
+                if (chapter == null || chapterPosition == null
+                        || chapterPosition <= previousInEpisode
+                        || chapterPosition < previousChapterPosition) {
+                    return null;
+                }
+                assignment.add(chapter);
+                previousInEpisode = chapterPosition;
+            }
+            previousChapterPosition = previousInEpisode;
+            assignments.add(assignment);
+        }
+        return assignments;
+    }
+
+    private List<List<Chapter>> proportionalChapterAssignments(List<Chapter> chapters, int targetEpisodes) {
+        int safeTarget = Math.max(1, targetEpisodes);
+        List<List<Chapter>> assignments = new ArrayList<>();
+        if (chapters.isEmpty()) {
+            for (int index = 0; index < safeTarget; index++) {
+                assignments.add(List.of());
+            }
+            return assignments;
+        }
+
+        for (int episodeIndex = 1; episodeIndex <= safeTarget; episodeIndex++) {
+            int start = (episodeIndex - 1) * chapters.size() / safeTarget;
+            int end = episodeIndex * chapters.size() / safeTarget;
+            if (end <= start) {
+                end = Math.min(start + 1, chapters.size());
+            }
+            assignments.add(chapters.subList(start, end));
+        }
+        return assignments;
+    }
+
+    private String formatOutlineDigest(List<Chapter> chapters) {
+        if (chapters.isEmpty()) {
+            return "No source chapters are available.";
+        }
+
+        int headingChars = 0;
+        for (Chapter chapter : chapters) {
+            headingChars += ("--- Chapter " + chapter.index() + ": " + chapter.title() + " ---\n\n").length();
+        }
+        if (headingChars >= OUTLINE_DIGEST_MAX_CHARS) {
+            return "The novel contains %d chapters. Chapter headings exceed the planning budget; use the per-episode source excerpts for details."
+                    .formatted(chapters.size());
+        }
+
+        int contentBudget = OUTLINE_DIGEST_MAX_CHARS - headingChars;
+        int perChapterLimit = Math.min(
+                CHAPTER_DIGEST_LIMIT,
+                Math.max(0, contentBudget / chapters.size() - 3)
+        );
+        return formatChapters(chapters, perChapterLimit);
     }
 
     private String formatChapters(List<Chapter> chapters, int maxCharsPerChapter) {
@@ -587,6 +695,33 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
         block.put("language", project.getSetting().getLanguage());
         block.put("target_episodes", targetEpisodes);
         return block;
+    }
+
+    private Map<String, Object> normalizeScriptRoot(Map<String, Object> root,
+                                                     ProjectWorkspace project,
+                                                     int targetEpisodes) {
+        Map<String, Object> normalized = new LinkedHashMap<>(root);
+        normalized.put("project", normalizedProjectBlock(root.get("project"), project, targetEpisodes));
+        return normalized;
+    }
+
+    private Map<String, Object> normalizedProjectBlock(Object source,
+                                                        ProjectWorkspace project,
+                                                        int targetEpisodes) {
+        Map<String, Object> normalized = defaultProject(project, targetEpisodes);
+        if (!(source instanceof Map<?, ?> sourceMap)) {
+            return normalized;
+        }
+
+        Object title = sourceMap.get("title");
+        if (title instanceof String titleText && !titleText.isBlank()) {
+            normalized.put("title", titleText);
+        }
+        Object summary = sourceMap.get("summary");
+        if (summary instanceof String summaryText && !summaryText.isBlank()) {
+            normalized.put("summary", summaryText);
+        }
+        return normalized;
     }
 
     private Map<String, Object> defaultCharacter() {
@@ -646,6 +781,9 @@ public class LlmScriptGenerationAgent implements ScriptGenerationAgent {
 
     private String excerpt(String value, int maxLength) {
         String compact = value == null ? "" : value.replaceAll("\\s+", " ").trim();
+        if (maxLength <= 0) {
+            return "";
+        }
         if (compact.length() <= maxLength) {
             return compact;
         }
